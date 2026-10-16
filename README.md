@@ -1,9 +1,5 @@
-<div align="center">
-
 <a href="https://pkg.go.dev/github.com/flohoss/gosso"><img src="https://pkg.go.dev/badge/github.com/flohoss/gosso.svg" alt="Go Reference"></a>
 [![CI](https://github.com/flohoss/gosso/actions/workflows/ci.yml/badge.svg)](https://github.com/flohoss/gosso/actions/workflows/ci.yml)
-
-</div>
 
 Shared OpenID Connect login package used by [GoDash](https://github.com/flohoss/godash), [GoCron](https://github.com/flohoss/gocron) and friends. One implementation of the browser handshake, cookie handling and session strategies so the apps behave identically: separate login page, `/auth/callback`, PKCE S256, state cookie, optional `app_url` for redirect- and proxy-safe callback URLs.
 
