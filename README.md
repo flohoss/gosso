@@ -6,7 +6,7 @@ Shared OpenID Connect login package used by [GoDash](https://github.com/flohoss/
 ## Install
 
 ```sh
-go get github.com/flohoss/gosso@v0.1.0
+go get github.com/flohoss/gosso@v1.0.1
 ```
 
 Requires Go 1.27 or newer.
@@ -26,7 +26,7 @@ Requires Go 1.27 or newer.
 
 ## Cookie naming
 
-Cookies are `<cookie_prefix>_oidc_state` and `<cookie_prefix>_session`. `Config.CookiePrefix` defaults to the client ID, so give each app a distinct client ID (or set the prefix) to avoid collisions on a shared domain.
+Cookies are `<cookie_prefix>_oidc_state` (from `Config.CookiePrefix`, which defaults to the client ID) and the session cookie named by your `SessionManager`. `HMACSessions` takes the name from `HMACOptions.CookieName`, or `HMACOptions.Prefix` + `_session`. Give each app a distinct client ID (or set the prefix/name) to avoid collisions on a shared domain.
 
 ## Usage sketch
 
