@@ -39,13 +39,13 @@ func NewProvider(settings func() Config) *Provider {
 // Warm starts discovery in the background so the first login request does not pay for it.
 func (p *Provider) Warm() {
 	go func() {
-		_, _ = p.Resolve()
+		_, _ = p.resolve()
 	}()
 }
 
-// Resolve returns the cached provider state, rediscovering when the issuer or client ID changed.
+// resolve returns the cached provider state, rediscovering when the issuer or client ID changed.
 // Discovery failures are not cached and are retried on the next call.
-func (p *Provider) Resolve() (*providerState, error) {
+func (p *Provider) resolve() (*providerState, error) {
 	current := p.settings()
 	key := providerKey(current)
 
@@ -102,7 +102,7 @@ func discoverProvider(settings Config) (*providerState, error) {
 
 // Login returns the oauth2.Config used to build the authorization redirect.
 func (p *Provider) Login(settings Config, redirectURL string) (oauth2.Config, error) {
-	state, err := p.Resolve()
+	state, err := p.resolve()
 	if err != nil {
 		return oauth2.Config{}, err
 	}
@@ -116,7 +116,7 @@ func (p *Provider) Login(settings Config, redirectURL string) (oauth2.Config, er
 
 // Exchange redeems the code with PKCE, verifies the id_token and returns its subject.
 func (p *Provider) Exchange(ctx context.Context, settings Config, code, verifier, redirectURL string) (string, error) {
-	state, err := p.Resolve()
+	state, err := p.resolve()
 	if err != nil {
 		return "", err
 	}

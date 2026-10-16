@@ -304,7 +304,7 @@ func TestResolved_ReflectsDiscoveryState(t *testing.T) {
 		t.Fatal("expected Resolved() to be false before discovery")
 	}
 
-	if _, err := auth.provider.Resolve(); err != nil {
+	if _, err := auth.provider.resolve(); err != nil {
 		t.Fatalf("unexpected discovery error: %v", err)
 	}
 	if !auth.Resolved() {

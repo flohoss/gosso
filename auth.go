@@ -196,9 +196,11 @@ func (a *Auth) Resolved() bool {
 	return a.provider.current != nil
 }
 
-// ProviderResolve returns the discovered provider state, triggering discovery when needed.
-func (a *Auth) ProviderResolve() (*providerState, error) {
-	return a.provider.Resolve()
+// ProviderResolve resolves the provider now and reports whether discovery succeeded.
+func (a *Auth) ProviderResolve() (bool, error) {
+	_, err := a.provider.resolve()
+
+	return err == nil, err
 }
 
 func (a *Auth) callbackURL(c *echo.Context) string {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -124,12 +125,12 @@ func TestProvider_ResolveCachesDiscoveredState(t *testing.T) {
 	config := fakeProviderConfig(server)
 	provider := NewProvider(func() Config { return config })
 
-	first, err := provider.Resolve()
+	first, err := provider.resolve()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	second, err := provider.Resolve()
+	second, err := provider.resolve()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestProvider_ResolveCachesDiscoveredState(t *testing.T) {
 	}
 
 	config.IssuerURL = "https://other.example.com"
-	if _, err := provider.Resolve(); err == nil {
+	if _, err := provider.resolve(); err == nil {
 		t.Fatal("expected a rediscovery attempt after the issuer changed")
 	}
 }
@@ -170,16 +171,32 @@ func TestRandomToken_ReturnsHexOfRequestedSize(t *testing.T) {
 	}
 }
 
-func TestAuth_ProviderResolveReturnsDiscoveredState(t *testing.T) {
+func TestAuth_ProviderResolveDiscoversTheProvider(t *testing.T) {
 	server := newFakeProvider(t)
 	config := fakeProviderConfig(server)
 	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
 
-	state, err := auth.ProviderResolve()
+	resolved, err := auth.ProviderResolve()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if state == nil {
-		t.Fatal("expected resolved provider state")
+	if !resolved {
+		t.Fatal("expected ProviderResolve to report success")
+	}
+	if !auth.Resolved() {
+		t.Fatal("expected the provider to be resolved")
+	}
+}
+
+func TestAuth_ProviderResolveReportsUnreachableProvider(t *testing.T) {
+	config := testConfig()
+	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+
+	resolved, err := auth.ProviderResolve()
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
+	}
+	if resolved {
+		t.Fatal("expected ProviderResolve to report failure")
 	}
 }
