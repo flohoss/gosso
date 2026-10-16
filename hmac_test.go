@@ -1,6 +1,9 @@
 package gosso
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -59,5 +62,33 @@ func TestVerifyHMAC_RejectsEmptySubject(t *testing.T) {
 
 	if _, _, err := VerifyHMAC(testSessionKey, value, time.Now()); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("expected ErrInvalidSession for an empty subject, got %v", err)
+	}
+}
+
+func TestVerifyHMAC_RejectsNonNumericExpiry(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte("user-subject|nonsense"))
+
+	mac := hmac.New(sha256.New, []byte(testSessionKey))
+	mac.Write([]byte("user-subject|nonsense"))
+	value := payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	if _, _, err := VerifyHMAC(testSessionKey, value, time.Now()); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("expected ErrInvalidSession for a non-numeric expiry, got %v", err)
+	}
+}
+
+func TestVerifyHMAC_RejectsMalformedBase64(t *testing.T) {
+	if _, _, err := VerifyHMAC(testSessionKey, "!!!.???", time.Now()); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("expected ErrInvalidSession for malformed base64, got %v", err)
+	}
+}
+
+func TestValidateSessionKey(t *testing.T) {
+	if err := ValidateSessionKey("short"); !errors.Is(err, ErrInvalidSessionKey) {
+		t.Fatalf("expected ErrInvalidSessionKey for a short key, got %v", err)
+	}
+
+	if err := ValidateSessionKey(testSessionKey); err != nil {
+		t.Fatalf("expected a long key to be accepted, got %v", err)
 	}
 }

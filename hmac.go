@@ -10,10 +10,12 @@ import (
 	"time"
 )
 
+// ErrInvalidSession is returned for a session cookie that is malformed, tampered with or expired.
 var ErrInvalidSession = errors.New("invalid session cookie")
 
 const sessionFieldSeparator = "|"
 
+// SignHMAC returns the base64url payload and HMAC-SHA256 signature for subject and expiresAt.
 func SignHMAC(key, subject string, expiresAt time.Time) string {
 	payload := subject + sessionFieldSeparator + strconv.FormatInt(expiresAt.Unix(), 10)
 
@@ -25,6 +27,7 @@ func SignHMAC(key, subject string, expiresAt time.Time) string {
 		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// VerifyHMAC validates the signature of value and returns the subject and expiry it carries.
 func VerifyHMAC(key, value string, now time.Time) (string, time.Time, error) {
 	encodedPayload, encodedMAC, found := strings.Cut(value, ".")
 	if !found {
@@ -65,6 +68,7 @@ func VerifyHMAC(key, value string, now time.Time) (string, time.Time, error) {
 	return subject, expiresAt, nil
 }
 
+// ValidateSessionKey reports ErrInvalidSessionKey when key is shorter than MinSessionKeyLength.
 func ValidateSessionKey(key string) error {
 	if len(key) < MinSessionKeyLength {
 		return ErrInvalidSessionKey
