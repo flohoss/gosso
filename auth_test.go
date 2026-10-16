@@ -109,6 +109,19 @@ func TestStartLogin_RedirectsToProviderWithStateCookie(t *testing.T) {
 	}
 }
 
+func TestStartLogin_RejectsInvalidConfig(t *testing.T) {
+	config := testConfig()
+	config.ClientSecret = ""
+	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+
+	e := echo.New()
+	echoContext := e.NewContext(httptest.NewRequest(http.MethodGet, "/auth/oidc", nil), httptest.NewRecorder())
+
+	if err := auth.StartLogin(echoContext, "/"); !errors.Is(err, ErrMissingOIDCFields) {
+		t.Fatalf("expected ErrMissingOIDCFields, got %v", err)
+	}
+}
+
 func TestStartLogin_FailsWhenProviderUnavailable(t *testing.T) {
 	config := testConfig()
 	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
@@ -177,7 +190,8 @@ func TestSanitizeRedirect(t *testing.T) {
 		{name: "path", raw: "/jobs/1", valid: "/jobs/1"},
 		{name: "absolute", raw: "https://evil.example.com", valid: "/"},
 		{name: "protocol relative", raw: "//evil.example.com", valid: "/"},
-		{name: "backslash", raw: "/\\evil", valid: "/\\evil"},
+		{name: "backslash", raw: "/\\evil", valid: "/"},
+		{name: "backslash in path", raw: "/jobs/\\..\\admin", valid: "/"},
 	}
 
 	for _, tc := range cases {
@@ -243,5 +257,123 @@ func TestSessionTTL_FollowsConfig(t *testing.T) {
 	config.SessionTTL = 0
 	if auth.SessionTTL() != DefaultSessionTTL {
 		t.Fatalf("expected the default TTL, got %v", auth.SessionTTL())
+	}
+}
+
+func TestAuth_EnabledToleratesNilReceiver(t *testing.T) {
+	var auth *Auth
+
+	if auth.Enabled() {
+		t.Fatal("expected a nil Auth to be disabled")
+	}
+}
+
+func TestPrefix_FallsBackToSanitizedClientID(t *testing.T) {
+	config := testConfig()
+	config.ClientID = "My-App-Client"
+	auth := &Auth{Settings: func() Config { return config }}
+
+	if got := auth.prefix(); got != "myappclient" {
+		t.Fatalf("prefix() = %q, want %q", got, "myappclient")
+	}
+
+	config.CookiePrefix = "custom"
+	if got := auth.prefix(); got != "custom" {
+		t.Fatalf("prefix() = %q, want %q", got, "custom")
+	}
+}
+
+func TestCallbackURL_ExportedWrapperMatchesInternal(t *testing.T) {
+	config := testConfig()
+	config.AppURL = "https://app.example.com"
+	auth := &Auth{Settings: func() Config { return config }, CallbackPath: "/auth/callback"}
+
+	echoContext, _ := newTestContext(http.MethodGet, "http://internal:8156/auth/login")
+
+	if got, want := auth.CallbackURL(echoContext), auth.callbackURL(echoContext); got != want {
+		t.Fatalf("CallbackURL() = %q, want %q", got, want)
+	}
+}
+
+func TestResolved_ReflectsDiscoveryState(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+
+	if auth.Resolved() {
+		t.Fatal("expected Resolved() to be false before discovery")
+	}
+
+	if _, err := auth.provider.Resolve(); err != nil {
+		t.Fatalf("unexpected discovery error: %v", err)
+	}
+	if !auth.Resolved() {
+		t.Fatal("expected Resolved() to be true after discovery")
+	}
+}
+
+func TestStartSessionAndClearSessionRoundTrip(t *testing.T) {
+	auth := newTestAuth(t)
+	echoContext, rec := newTestContext(http.MethodGet, "/")
+
+	if err := auth.StartSession(echoContext, "user-subject"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == auth.Sessions.CookieName() {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("expected a session cookie after StartSession")
+	}
+
+	subject, _, err := VerifyHMAC(testSessionKey, session.Value, time.Now())
+	if err != nil {
+		t.Fatalf("expected the session cookie to verify: %v", err)
+	}
+	if subject != "user-subject" {
+		t.Fatalf("unexpected subject %q", subject)
+	}
+
+	clearedContext, clearedRecorder := newTestContext(http.MethodGet, "/")
+	auth.ClearSession(clearedContext)
+
+	var expired *http.Cookie
+	for _, cookie := range clearedRecorder.Result().Cookies() {
+		if cookie.Name == auth.Sessions.CookieName() {
+			expired = cookie
+		}
+	}
+	if expired == nil || expired.MaxAge != -1 {
+		t.Fatalf("expected ClearSession to expire the cookie, got %+v", expired)
+	}
+}
+
+func TestExchange_ReturnsTheSubject(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+
+	echoContext, _ := newTestContext(http.MethodGet, server.URL+"/auth/callback?code=user-123")
+
+	subject, err := auth.Exchange(echoContext, "user-123", "verifier")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if subject != "user-123" {
+		t.Fatalf("subject = %q, want %q", subject, "user-123")
+	}
+}
+
+func TestMiddleware_AcceptsAuthenticatedRequest(t *testing.T) {
+	auth := newTestAuth(t)
+	cookie := auth.Sessions.CookieName() + "=" + SignHMAC(testSessionKey, "user-subject", time.Now().Add(time.Hour))
+
+	rec := serveWithAuth(auth, "/", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for an authenticated request, got %d", rec.Code)
 	}
 }
