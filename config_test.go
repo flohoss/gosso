@@ -47,6 +47,24 @@ func TestValidate_ToleratesBareHostAppURL(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsUnparsableIssuer(t *testing.T) {
+	config := testConfig()
+	config.IssuerURL = "https://sso.example.com/%zz"
+
+	if err := config.Validate(); !errors.Is(err, ErrInvalidIssuer) {
+		t.Fatalf("expected ErrInvalidIssuer for an unparsable issuer, got %v", err)
+	}
+}
+
+func TestValidate_RejectsUnparsableAppURL(t *testing.T) {
+	config := testConfig()
+	config.AppURL = "https://app.example.com/%zz"
+
+	if err := config.Validate(); err == nil {
+		t.Fatal("expected an error for an unparsable app_url")
+	}
+}
+
 func TestWithDefaults_FillsSessionTTLAndScopes(t *testing.T) {
 	filled := Config{IssuerURL: "https://sso.example.com"}.WithDefaults()
 

@@ -8,8 +8,10 @@ import (
 	"time"
 )
 
+// MinSessionKeyLength is the shortest accepted signing key for HMACSessions.
 const MinSessionKeyLength = 32
 
+// Config holds the OpenID Connect settings shared by all apps using this package.
 type Config struct {
 	IssuerURL    string
 	ClientID     string
@@ -24,23 +26,28 @@ type Config struct {
 }
 
 var (
-	ErrInvalidIssuer     = errors.New("sso configuration error: issuer_url must be a valid absolute URL without a trailing slash")
+	// ErrInvalidIssuer is returned when IssuerURL is not an absolute URL or has a trailing slash.
+	ErrInvalidIssuer = errors.New("sso configuration error: issuer_url must be a valid absolute URL without a trailing slash")
+	// ErrMissingOIDCFields is returned when a required credential is empty while SSO is enabled.
 	ErrMissingOIDCFields = errors.New("sso configuration error: issuer_url, client_id and client_secret are required when SSO is enabled")
 )
 
+// DefaultScopes returns the scopes requested when Config.Scopes is empty.
 func DefaultScopes() []string {
 	return []string{"openid"}
 }
 
+// Validate reports whether the config carries usable issuer credentials and, when set, a parsable AppURL.
 func (c Config) Validate() error {
 	if c.IssuerURL == "" || c.ClientID == "" || c.ClientSecret == "" {
 		return ErrMissingOIDCFields
 	}
 
-	if _, err := url.Parse(c.IssuerURL); err != nil {
+	parsed, err := url.Parse(c.IssuerURL)
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidIssuer, err)
 	}
-	if parsed, err := url.Parse(c.IssuerURL); err != nil || parsed.Host == "" || parsed.Scheme == "" || strings.HasSuffix(c.IssuerURL, "/") {
+	if parsed.Scheme == "" || parsed.Host == "" || strings.HasSuffix(c.IssuerURL, "/") {
 		return ErrInvalidIssuer
 	}
 
@@ -53,6 +60,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// WithDefaults returns a copy with SessionTTL and Scopes filled in when they are empty.
 func (c Config) WithDefaults() Config {
 	filled := c
 
