@@ -38,6 +38,10 @@ func NewHMACSessions(opts HMACOptions) *HMACSessions {
 
 // Start writes the signed session cookie for subject, expiring at expiresAt.
 func (h *HMACSessions) Start(echoContext *echo.Context, subject string, expiresAt time.Time) error {
+	if err := ValidateSessionKey(h.settings().SessionKey); err != nil {
+		return err
+	}
+
 	echoContext.SetCookie(h.cookie(SignHMAC(h.settings().SessionKey, subject, expiresAt), 0, expiresAt))
 
 	return nil
@@ -50,7 +54,12 @@ func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
 		return nil, ErrUnauthenticated
 	}
 
-	subject, expiresAt, err := VerifyHMAC(h.settings().SessionKey, cookie.Value, time.Now())
+	sessionKey := h.settings().SessionKey
+	if err := ValidateSessionKey(sessionKey); err != nil {
+		return nil, ErrUnauthenticated
+	}
+
+	subject, expiresAt, err := VerifyHMAC(sessionKey, cookie.Value, time.Now())
 	if err != nil {
 		return nil, ErrUnauthenticated
 	}

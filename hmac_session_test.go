@@ -178,3 +178,38 @@ func TestHMACSessions_DoesNotRefreshEarly(t *testing.T) {
 		}
 	}
 }
+
+// A short signing key must never produce a session: Start rejects it loudly so
+// a misconfigured deployment fails at the first login instead of issuing
+// forgeable cookies.
+func TestHMACSessions_StartRejectsShortKey(t *testing.T) {
+	config := testConfig()
+	config.SessionKey = "too-short"
+
+	sessions := NewHMACSessions(HMACOptions{Prefix: "testapp", Settings: func() Config { return config }})
+	echoContext, rec := newTestContext(http.MethodGet, "/")
+
+	if err := sessions.Start(echoContext, "user-subject", time.Now().Add(time.Hour)); !errors.Is(err, ErrInvalidSessionKey) {
+		t.Fatalf("expected ErrInvalidSessionKey, got %v", err)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("expected no session cookie for a rejected key")
+	}
+}
+
+// A valid-looking cookie signed with a now-rejected key must not authenticate.
+func TestHMACSessions_AuthenticateRejectsShortKey(t *testing.T) {
+	config := testConfig()
+	config.SessionKey = "too-short"
+
+	sessions := NewHMACSessions(HMACOptions{Prefix: "testapp", Settings: func() Config { return config }})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC("too-short", "user-subject", time.Now().Add(time.Hour)))
+	c := e.NewContext(req, httptest.NewRecorder())
+
+	if _, err := sessions.Authenticate(c); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated, got %v", err)
+	}
+}
