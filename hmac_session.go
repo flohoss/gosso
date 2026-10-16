@@ -7,19 +7,23 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
+// DefaultSessionTTL is the session lifetime used when Config.SessionTTL is not positive.
 const DefaultSessionTTL = 24 * time.Hour
 
+// HMACOptions configures NewHMACSessions. CookieName takes precedence over Prefix.
 type HMACOptions struct {
 	Prefix     string
 	CookieName string
 	Settings   func() Config
 }
 
+// HMACSessions is a SessionManager backed by a signed, stateless cookie.
 type HMACSessions struct {
 	cookieName string
 	settings   func() Config
 }
 
+// NewHMACSessions returns the cookie name from opts.CookieName, or opts.Prefix with "_session" appended.
 func NewHMACSessions(opts HMACOptions) *HMACSessions {
 	name := opts.CookieName
 	if name == "" {
@@ -32,12 +36,14 @@ func NewHMACSessions(opts HMACOptions) *HMACSessions {
 	}
 }
 
+// Start writes the signed session cookie for subject, expiring at expiresAt.
 func (h *HMACSessions) Start(echoContext *echo.Context, subject string, expiresAt time.Time) error {
 	echoContext.SetCookie(h.cookie(SignHMAC(h.settings().SessionKey, subject, expiresAt), 0, expiresAt))
 
 	return nil
 }
 
+// Authenticate verifies the session cookie and refreshes it once half the TTL has passed.
 func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
 	cookie, err := echoContext.Cookie(h.cookieName)
 	if err != nil || cookie.Value == "" {
@@ -54,12 +60,14 @@ func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
 	return &User{Subject: subject}, nil
 }
 
+// Clear expires the session cookie.
 func (h *HMACSessions) Clear(echoContext *echo.Context) error {
 	echoContext.SetCookie(h.cookie("", -1, time.Time{}))
 
 	return nil
 }
 
+// CookieName returns the name of the session cookie.
 func (h *HMACSessions) CookieName() string {
 	return h.cookieName
 }

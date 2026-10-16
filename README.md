@@ -2,6 +2,14 @@
 
 Shared OpenID Connect login package used by [GoDash](https://github.com/flohoss/godash), [GoCron](https://github.com/flohoss/gocron) and friends. One implementation of the browser handshake, cookie handling and session strategies so the apps behave identically: separate login page, `/auth/callback`, PKCE S256, state cookie, optional `app_url` for redirect- and proxy-safe callback URLs.
 
+## Install
+
+```sh
+go get github.com/flohoss/gosso@v0.1.0
+```
+
+Requires Go 1.27 or newer.
+
 ## What it provides
 
 - `Config` — issuer, client credentials, session TTL, `cookie_secure`, `app_url`, cookie prefix. `Validate()` enforces issuer/secret rules.
@@ -24,11 +32,11 @@ Cookies are `<cookie_prefix>_oidc_state` and `<cookie_prefix>_session`. `Config.
 ```go
 sessions := gosso.NewHMACSessions(gosso.HMACOptions{
 	Prefix:   "myapp",
-	Settings: func() gosso.Config { return gosso.SSOSettings() },
+	Settings: func() gosso.Config { return config.SSO() },
 })
 
 auth := gosso.New(
-	func() gosso.Config { return gosso.SSOSettings() },
+	func() gosso.Config { return config.SSO() },
 	sessions,
 	"/auth/callback",
 	"/login",

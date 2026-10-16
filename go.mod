@@ -1,6 +1,6 @@
 module github.com/flohoss/gosso
 
-go 1.27.2
+go 1.27
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0

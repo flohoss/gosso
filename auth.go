@@ -14,6 +14,7 @@ const (
 	stateSeparator = "|"
 )
 
+// Auth runs the Echo v5 login lifecycle and the session middleware for a single app.
 type Auth struct {
 	Sessions SessionManager
 
@@ -24,6 +25,7 @@ type Auth struct {
 	provider *Provider
 }
 
+// New wires an Auth to settings and a session store. Enabled settings warm provider discovery in the background.
 func New(settings func() Config, sessions SessionManager, callbackPath, loginPath string) *Auth {
 	auth := &Auth{
 		Sessions:     sessions,
@@ -40,6 +42,7 @@ func New(settings func() Config, sessions SessionManager, callbackPath, loginPat
 	return auth
 }
 
+// Enabled reports whether SSO is switched on, tolerating a nil receiver.
 func (a *Auth) Enabled() bool {
 	if a == nil {
 		return false
@@ -48,6 +51,7 @@ func (a *Auth) Enabled() bool {
 	return a.Settings().Enabled
 }
 
+// StartLogin writes the state cookie and redirects the browser to the provider.
 func (a *Auth) StartLogin(echoContext *echo.Context, redirect string) error {
 	config := a.Settings()
 	if err := config.Validate(); err != nil {
@@ -79,6 +83,7 @@ func (a *Auth) StartLogin(echoContext *echo.Context, redirect string) error {
 	return nil
 }
 
+// ConsumeLoginState validates and clears the state cookie and returns the state, PKCE verifier and redirect target.
 func (a *Auth) ConsumeLoginState(echoContext *echo.Context) (state, verifier, redirect string, err error) {
 	a.clearLoginState(echoContext)
 
@@ -100,24 +105,29 @@ func (a *Auth) ConsumeLoginState(echoContext *echo.Context) (state, verifier, re
 	return state, verifier, redirect, nil
 }
 
+// Exchange redeems the authorization code and returns the verified subject of the id_token.
 func (a *Auth) Exchange(echoContext *echo.Context, code, verifier string) (string, error) {
 	config := a.Settings()
 
 	return a.provider.Exchange(echoContext.Request().Context(), config, code, verifier, a.callbackURL(echoContext))
 }
 
+// StartSession stores a session for subject through the configured SessionManager.
 func (a *Auth) StartSession(echoContext *echo.Context, subject string) error {
 	return a.Sessions.Start(echoContext, subject, time.Now().Add(a.SessionTTL()))
 }
 
+// Authenticate resolves the current user from the session store.
 func (a *Auth) Authenticate(echoContext *echo.Context) (*User, error) {
 	return a.Sessions.Authenticate(echoContext)
 }
 
+// ClearSession removes the local session, without contacting the provider.
 func (a *Auth) ClearSession(echoContext *echo.Context) {
 	a.Sessions.Clear(echoContext)
 }
 
+// SessionTTL returns the configured session lifetime, falling back to DefaultSessionTTL.
 func (a *Auth) SessionTTL() time.Duration {
 	ttl := a.Settings().SessionTTL
 	if ttl <= 0 {
@@ -127,6 +137,7 @@ func (a *Auth) SessionTTL() time.Duration {
 	return ttl
 }
 
+// Middleware redirects unauthenticated requests to LoginPath, or answers 401 when no login path is set.
 func (a *Auth) Middleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
@@ -172,15 +183,22 @@ func (a *Auth) cookieSecure() bool {
 	return a.Settings().CookieSecure
 }
 
+// CallbackURL returns the redirect URI registered with the provider for this request.
 func (a *Auth) CallbackURL(c *echo.Context) string {
 	return a.callbackURL(c)
 }
 
+// Resolved reports whether provider discovery has already completed successfully.
 func (a *Auth) Resolved() bool {
 	a.provider.mu.Lock()
 	defer a.provider.mu.Unlock()
 
 	return a.provider.current != nil
+}
+
+// ProviderResolve returns the discovered provider state, triggering discovery when needed.
+func (a *Auth) ProviderResolve() (*providerState, error) {
+	return a.provider.Resolve()
 }
 
 func (a *Auth) callbackURL(c *echo.Context) string {
@@ -191,8 +209,9 @@ func (a *Auth) callbackURL(c *echo.Context) string {
 	return c.Scheme() + "://" + c.Request().Host + a.CallbackPath
 }
 
+// SanitizeRedirect keeps only same-origin absolute paths and falls back to "/" for anything else.
 func SanitizeRedirect(raw string) string {
-	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.Contains(raw, "\\") {
 		return "/"
 	}
 
