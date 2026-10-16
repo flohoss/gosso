@@ -1,7 +1,0 @@
-services:
-  go:
-    image: golang:1.27.2
-    working_dir: /app
-    entrypoint: go
-    volumes:
-      - ./:/app/
