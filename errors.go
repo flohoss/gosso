@@ -14,6 +14,10 @@ var (
 	ErrProviderUnavailable = errors.New("identity provider is not reachable")
 	// ErrInvalidSessionKey is returned by ValidateSessionKey for short signing keys.
 	ErrInvalidSessionKey = errors.New("session signing key must be at least 32 characters")
+	// ErrStateMismatch is returned when the callback state does not match the login state cookie.
+	ErrStateMismatch = errors.New("callback state does not match the login state")
+	// ErrSubjectUnauthorized is returned when AuthorizeSubject refuses a verified subject.
+	ErrSubjectUnauthorized = errors.New("subject is not authorized to sign in")
 )
 
 // LoginError is the stable code an app redirects to its login page with.
