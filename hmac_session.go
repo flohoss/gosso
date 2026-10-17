@@ -48,6 +48,8 @@ func (h *HMACSessions) Start(echoContext *echo.Context, subject string, expiresA
 }
 
 // Authenticate verifies the session cookie and refreshes it once half the TTL has passed.
+// Sessions are stateless by design: they cannot be revoked before their expiry, so back them
+// with a custom SessionManager when immediate revocation matters.
 func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
 	cookie, err := echoContext.Cookie(h.cookieName)
 	if err != nil || cookie.Value == "" {
@@ -82,26 +84,17 @@ func (h *HMACSessions) CookieName() string {
 }
 
 func (h *HMACSessions) refresh(echoContext *echo.Context, subject string, expiresAt time.Time) {
-	ttl := h.ttl()
+	ttl := h.settings().EffectiveSessionTTL()
 	if ttl <= 0 {
 		return
 	}
 
-	if time.Until(expiresAt) >= ttl/2 {
+	if time.Until(expiresAt) >= h.settings().EffectiveSessionTTL()/2 {
 		return
 	}
 
 	renewed := time.Now().Add(ttl)
 	echoContext.SetCookie(h.cookie(SignHMAC(h.settings().SessionKey, subject, renewed), 0, renewed))
-}
-
-func (h *HMACSessions) ttl() time.Duration {
-	ttl := h.settings().SessionTTL
-	if ttl <= 0 {
-		return DefaultSessionTTL
-	}
-
-	return ttl
 }
 
 func (h *HMACSessions) cookie(value string, maxAge int, expires time.Time) *http.Cookie {

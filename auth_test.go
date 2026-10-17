@@ -188,10 +188,18 @@ func TestSanitizeRedirect(t *testing.T) {
 		{name: "empty", raw: "", valid: "/"},
 		{name: "root", raw: "/", valid: "/"},
 		{name: "path", raw: "/jobs/1", valid: "/jobs/1"},
+		{name: "query preserved", raw: "/jobs/1?page=2", valid: "/jobs/1?page=2"},
+		{name: "percent in path", raw: "/jobs/100%25", valid: "/jobs/100%25"},
 		{name: "absolute", raw: "https://evil.example.com", valid: "/"},
+		{name: "scheme other", raw: "javascript:alert(1)", valid: "/"},
 		{name: "protocol relative", raw: "//evil.example.com", valid: "/"},
+		{name: "encoded protocol relative", raw: "/%2F%2Fevil.example.com", valid: "/"},
+		{name: "mixed encoded protocol relative", raw: "/%2f%2fevil.example.com", valid: "/"},
+		{name: "doubly encoded", raw: "/%252F%252Fevil.example.com", valid: "/"},
+		{name: "encoded backslash", raw: "/%5Cevil", valid: "/"},
 		{name: "backslash", raw: "/\\evil", valid: "/"},
 		{name: "backslash in path", raw: "/jobs/\\..\\admin", valid: "/"},
+		{name: "nul byte", raw: "/\x00evil", valid: "/"},
 	}
 
 	for _, tc := range cases {
@@ -349,6 +357,155 @@ func TestStartSessionAndClearSessionRoundTrip(t *testing.T) {
 	}
 	if expired == nil || expired.MaxAge != -1 {
 		t.Fatalf("expected ClearSession to expire the cookie, got %+v", expired)
+	}
+}
+
+func TestDefaultCookiePrefix_PrefersConfigOverClientID(t *testing.T) {
+	if got := DefaultCookiePrefix(Config{CookiePrefix: "custom"}); got != "custom" {
+		t.Fatalf("DefaultCookiePrefix() = %q, want %q", got, "custom")
+	}
+
+	if got := DefaultCookiePrefix(Config{ClientID: "My-App-Client"}); got != "myappclient" {
+		t.Fatalf("DefaultCookiePrefix() = %q, want %q", got, "myappclient")
+	}
+}
+
+func TestHandleCallback_RunsTheFullFlow(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+
+	state, err := RandomToken(stateTokenSize)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	verifier := "verifier"
+	echoContext, rec := newTestContext(http.MethodGet,
+		server.URL+"/auth/callback?code=user-123&state="+state)
+	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|" + verifier + "|/jobs/1"})
+
+	result, failure := auth.HandleCallback(echoContext)
+	if failure != nil {
+		t.Fatalf("unexpected failure: %v", failure.Cause)
+	}
+	if result.Subject != "user-123" || result.Redirect != "/jobs/1" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == auth.Sessions.CookieName() {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("expected a session cookie after the callback")
+	}
+	if subject, _, err := VerifyHMAC(testSessionKey, session.Value, time.Now()); err != nil || subject != "user-123" {
+		t.Fatalf("expected a valid session for user-123, got %q: %v", subject, err)
+	}
+}
+
+func TestHandleCallback_RejectsProviderReportedError(t *testing.T) {
+	auth := newTestAuth(t)
+	echoContext, _ := newTestContext(http.MethodGet, "/auth/callback?error=access_denied")
+
+	result, failure := auth.HandleCallback(echoContext)
+	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
+		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
+	}
+}
+
+func TestHandleCallback_RejectsStateMismatch(t *testing.T) {
+	auth := newTestAuth(t)
+	echoContext, _ := newTestContext(http.MethodGet, "/auth/callback?code=user-123&state=other")
+	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "expected|verifier"})
+
+	result, failure := auth.HandleCallback(echoContext)
+	if result != nil || failure == nil || failure.Code != LoginErrorExpired {
+		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
+	}
+	if !errors.Is(failure.Cause, ErrStateMismatch) {
+		t.Fatalf("expected ErrStateMismatch, got %v", failure.Cause)
+	}
+}
+
+func TestHandleCallback_ClassifiesExchangeFailures(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+
+	echoContext, _ := newTestContext(http.MethodGet,
+		server.URL+"/auth/callback?code=no-id-token&state=any")
+	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "any|verifier"})
+
+	result, failure := auth.HandleCallback(echoContext)
+	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
+		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
+	}
+}
+
+func TestHandleCallback_EnforcesAuthorizedSubjects(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+	auth.AuthorizeSubject = func(subject string) bool { return subject != "user-123" }
+
+	state, err := RandomToken(stateTokenSize)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	echoContext, rec := newTestContext(http.MethodGet,
+		server.URL+"/auth/callback?code=user-123&state="+state)
+	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
+
+	result, failure := auth.HandleCallback(echoContext)
+	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
+		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
+	}
+	if !errors.Is(failure.Cause, ErrSubjectUnauthorized) {
+		t.Fatalf("expected ErrSubjectUnauthorized, got %v", failure.Cause)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == auth.Sessions.CookieName() {
+			session = cookie
+		}
+	}
+	if session != nil {
+		t.Fatalf("expected no session cookie for an unauthorized subject, got %+v", session)
+	}
+}
+
+func TestHandleCallback_ReportsSessionFailures(t *testing.T) {
+	server := newFakeProvider(t)
+	config := fakeProviderConfig(server)
+	sessions := NewHMACSessions(HMACOptions{
+		Prefix: "testapp",
+		Settings: func() Config {
+			broken := config
+			broken.SessionKey = "too-short"
+
+			return broken
+		},
+	})
+	auth := New(func() Config { return config }, sessions, "/auth/callback", "/login")
+
+	state, err := RandomToken(stateTokenSize)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	echoContext, _ := newTestContext(http.MethodGet,
+		server.URL+"/auth/callback?code=user-123&state="+state)
+	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
+
+	result, failure := auth.HandleCallback(echoContext)
+	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
+		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
+	}
+	if !errors.Is(failure.Cause, ErrInvalidSessionKey) {
+		t.Fatalf("expected ErrInvalidSessionKey, got %v", failure.Cause)
 	}
 }
 
