@@ -57,7 +57,22 @@ func (c Config) Validate() error {
 		}
 	}
 
+	if c.SessionKey != "" {
+		if err := ValidateSessionKey(c.SessionKey); err != nil {
+			return fmt.Errorf("sso configuration error: %w", err)
+		}
+	}
+
 	return nil
+}
+
+// EffectiveSessionTTL returns SessionTTL, falling back to DefaultSessionTTL when it is not positive.
+func (c Config) EffectiveSessionTTL() time.Duration {
+	if c.SessionTTL <= 0 {
+		return DefaultSessionTTL
+	}
+
+	return c.SessionTTL
 }
 
 // WithDefaults returns a copy with SessionTTL and Scopes filled in when they are empty.

@@ -65,6 +65,35 @@ func TestValidate_RejectsUnparsableAppURL(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsShortSessionKey(t *testing.T) {
+	config := testConfig()
+	config.SessionKey = "too-short"
+
+	if err := config.Validate(); !errors.Is(err, ErrInvalidSessionKey) {
+		t.Fatalf("expected ErrInvalidSessionKey, got %v", err)
+	}
+}
+
+func TestValidate_ToleratesEmptySessionKey(t *testing.T) {
+	config := testConfig()
+	config.SessionKey = ""
+
+	if err := config.Validate(); err != nil {
+		t.Fatalf("expected an empty session key to be allowed, got %v", err)
+	}
+}
+
+func TestEffectiveSessionTTL_FallsBackToDefault(t *testing.T) {
+	if got := (Config{}).EffectiveSessionTTL(); got != DefaultSessionTTL {
+		t.Fatalf("expected the default TTL, got %v", got)
+	}
+
+	config := Config{SessionTTL: 2 * time.Hour}
+	if got := config.EffectiveSessionTTL(); got != 2*time.Hour {
+		t.Fatalf("expected the configured TTL, got %v", got)
+	}
+}
+
 func TestWithDefaults_FillsSessionTTLAndScopes(t *testing.T) {
 	filled := Config{IssuerURL: "https://sso.example.com"}.WithDefaults()
 
