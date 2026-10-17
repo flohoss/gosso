@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/labstack/echo/v5"
 )
 
 func newHMACSessions() *HMACSessions {
@@ -20,10 +18,10 @@ func newHMACSessions() *HMACSessions {
 
 func TestHMACSessions_StartSetsSignedCookie(t *testing.T) {
 	sessions := newHMACSessions()
-	echoContext, rec := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 	expiresAt := time.Now().Add(time.Hour)
 
-	if err := sessions.Start(echoContext, "user-subject", expiresAt); err != nil {
+	if err := sessions.Start(rec, req, "user-subject", expiresAt); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -57,12 +55,10 @@ func TestHMACSessions_AuthenticateRoundTrips(t *testing.T) {
 	sessions := newHMACSessions()
 
 	rec := httptest.NewRecorder()
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", time.Now().Add(time.Hour)))
-	c := e.NewContext(req, rec)
+	req.Header.Set("Cookie", sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", time.Now().Add(time.Hour)))
 
-	user, err := sessions.Authenticate(c)
+	user, err := sessions.Authenticate(rec, req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,21 +69,19 @@ func TestHMACSessions_AuthenticateRoundTrips(t *testing.T) {
 
 func TestHMACSessions_AuthenticateRejectsGarbage(t *testing.T) {
 	sessions := newHMACSessions()
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"=tampered")
-	c := e.NewContext(req, httptest.NewRecorder())
+	req.Header.Set("Cookie", sessions.CookieName()+"=tampered")
 
-	if _, err := sessions.Authenticate(c); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := sessions.Authenticate(httptest.NewRecorder(), req); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
 }
 
 func TestHMACSessions_ClearExpiresCookie(t *testing.T) {
 	sessions := newHMACSessions()
-	echoContext, rec := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 
-	if err := sessions.Clear(echoContext); err != nil {
+	if err := sessions.Clear(rec, req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -105,14 +99,12 @@ func TestHMACSessions_ClearExpiresCookie(t *testing.T) {
 func TestHMACSessions_RefreshesPastHalfTTL(t *testing.T) {
 	sessions := newHMACSessions()
 
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	oldExpiry := time.Now().Add(30 * time.Minute)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", oldExpiry))
+	req.Header.Set("Cookie", sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", oldExpiry))
 	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
 
-	if _, err := sessions.Authenticate(c); err != nil {
+	if _, err := sessions.Authenticate(rec, req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -135,12 +127,11 @@ func TestHMACSessions_RefreshesUsingDefaultTTLWhenUnset(t *testing.T) {
 	config.SessionTTL = 0
 	sessions := NewHMACSessions(HMACOptions{Prefix: "testapp", Settings: func() Config { return config }})
 
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", time.Now().Add(30*time.Minute)))
+	req.Header.Set("Cookie", sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", time.Now().Add(30*time.Minute)))
 	rec := httptest.NewRecorder()
 
-	if _, err := sessions.Authenticate(e.NewContext(req, rec)); err != nil {
+	if _, err := sessions.Authenticate(rec, req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -161,14 +152,12 @@ func TestHMACSessions_RefreshesUsingDefaultTTLWhenUnset(t *testing.T) {
 func TestHMACSessions_DoesNotRefreshEarly(t *testing.T) {
 	sessions := newHMACSessions()
 
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	freshExpiry := time.Now().Add(time.Hour)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", freshExpiry))
+	req.Header.Set("Cookie", sessions.CookieName()+"="+SignHMAC(testSessionKey, "user-subject", freshExpiry))
 	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
 
-	if _, err := sessions.Authenticate(c); err != nil {
+	if _, err := sessions.Authenticate(rec, req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -187,9 +176,9 @@ func TestHMACSessions_StartRejectsShortKey(t *testing.T) {
 	config.SessionKey = "too-short"
 
 	sessions := NewHMACSessions(HMACOptions{Prefix: "testapp", Settings: func() Config { return config }})
-	echoContext, rec := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 
-	if err := sessions.Start(echoContext, "user-subject", time.Now().Add(time.Hour)); !errors.Is(err, ErrInvalidSessionKey) {
+	if err := sessions.Start(rec, req, "user-subject", time.Now().Add(time.Hour)); !errors.Is(err, ErrInvalidSessionKey) {
 		t.Fatalf("expected ErrInvalidSessionKey, got %v", err)
 	}
 	if len(rec.Result().Cookies()) != 0 {
@@ -204,12 +193,10 @@ func TestHMACSessions_AuthenticateRejectsShortKey(t *testing.T) {
 
 	sessions := NewHMACSessions(HMACOptions{Prefix: "testapp", Settings: func() Config { return config }})
 
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(echo.HeaderCookie, sessions.CookieName()+"="+SignHMAC("too-short", "user-subject", time.Now().Add(time.Hour)))
-	c := e.NewContext(req, httptest.NewRecorder())
+	req.Header.Set("Cookie", sessions.CookieName()+"="+SignHMAC("too-short", "user-subject", time.Now().Add(time.Hour)))
 
-	if _, err := sessions.Authenticate(c); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := sessions.Authenticate(httptest.NewRecorder(), req); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
 }

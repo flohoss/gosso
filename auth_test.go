@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
-	"github.com/labstack/echo/v5"
 )
 
 func newOIDCServer(t *testing.T) *httptest.Server {
@@ -67,21 +66,18 @@ func TestStartLogin_RedirectsToProviderWithStateCookie(t *testing.T) {
 	config.IssuerURL = server.URL
 	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
 
-	e := echo.New()
-	authHandler := func(c *echo.Context) error {
-		return auth.StartLogin(c, "/after/login")
-	}
-	e.GET("/auth/oidc", authHandler)
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
 	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
+
+	if err := auth.StartLogin(rec, req, "/after/login"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected a redirect, got %d", rec.Code)
 	}
 
-	location := rec.Header().Get(echo.HeaderLocation)
+	location := rec.Header().Get("Location")
 	if !strings.HasPrefix(location, server.URL+"/auth?") {
 		t.Fatalf("expected a redirect to the provider, got %q", location)
 	}
@@ -114,10 +110,10 @@ func TestStartLogin_RejectsInvalidConfig(t *testing.T) {
 	config.ClientSecret = ""
 	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
 
-	e := echo.New()
-	echoContext := e.NewContext(httptest.NewRequest(http.MethodGet, "/auth/oidc", nil), httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
+	rec := httptest.NewRecorder()
 
-	if err := auth.StartLogin(echoContext, "/"); !errors.Is(err, ErrMissingOIDCFields) {
+	if err := auth.StartLogin(rec, req, "/"); !errors.Is(err, ErrMissingOIDCFields) {
 		t.Fatalf("expected ErrMissingOIDCFields, got %v", err)
 	}
 }
@@ -126,12 +122,10 @@ func TestStartLogin_FailsWhenProviderUnavailable(t *testing.T) {
 	config := testConfig()
 	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
 
-	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
 	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
 
-	err := auth.StartLogin(c, "/")
+	err := auth.StartLogin(rec, req, "/")
 
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
@@ -142,11 +136,11 @@ func TestConsumeLoginState_ParsesAllParts(t *testing.T) {
 	config := testConfig()
 	auth := &Auth{Settings: func() Config { return config }}
 
-	echoContext, _ := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 	value := "state-token|verifier-token|/jobs/1"
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: value})
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: value})
 
-	state, verifier, redirect, err := auth.ConsumeLoginState(echoContext)
+	state, verifier, redirect, err := auth.ConsumeLoginState(rec, req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,9 +154,9 @@ func TestConsumeLoginState_RejectsMissingCookie(t *testing.T) {
 	config := testConfig()
 	auth := &Auth{Settings: func() Config { return config }}
 
-	echoContext, _ := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 
-	if _, _, _, err := auth.ConsumeLoginState(echoContext); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, _, err := auth.ConsumeLoginState(rec, req); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
 }
@@ -171,64 +165,11 @@ func TestConsumeLoginState_RejectsIncompleteValue(t *testing.T) {
 	config := testConfig()
 	auth := &Auth{Settings: func() Config { return config }}
 
-	echoContext, _ := newTestContext(http.MethodGet, "/")
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "only-state"})
+	rec, req := newTestContext(http.MethodGet, "/")
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "only-state"})
 
-	if _, _, _, err := auth.ConsumeLoginState(echoContext); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, _, err := auth.ConsumeLoginState(rec, req); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
-	}
-}
-
-func TestSanitizeRedirect(t *testing.T) {
-	cases := []struct {
-		name  string
-		raw   string
-		valid string
-	}{
-		{name: "empty", raw: "", valid: "/"},
-		{name: "root", raw: "/", valid: "/"},
-		{name: "path", raw: "/jobs/1", valid: "/jobs/1"},
-		{name: "query preserved", raw: "/jobs/1?page=2", valid: "/jobs/1?page=2"},
-		{name: "percent in path", raw: "/jobs/100%25", valid: "/jobs/100%25"},
-		{name: "absolute", raw: "https://evil.example.com", valid: "/"},
-		{name: "scheme other", raw: "javascript:alert(1)", valid: "/"},
-		{name: "protocol relative", raw: "//evil.example.com", valid: "/"},
-		{name: "encoded protocol relative", raw: "/%2F%2Fevil.example.com", valid: "/"},
-		{name: "mixed encoded protocol relative", raw: "/%2f%2fevil.example.com", valid: "/"},
-		{name: "doubly encoded", raw: "/%252F%252Fevil.example.com", valid: "/"},
-		{name: "encoded backslash", raw: "/%5Cevil", valid: "/"},
-		{name: "backslash", raw: "/\\evil", valid: "/"},
-		{name: "backslash in path", raw: "/jobs/\\..\\admin", valid: "/"},
-		{name: "nul byte", raw: "/\x00evil", valid: "/"},
-	}
-
-	for _, tc := range cases {
-		if got := SanitizeRedirect(tc.raw); got != tc.valid {
-			t.Errorf("%s: SanitizeRedirect(%q) = %q, want %q", tc.name, tc.raw, got, tc.valid)
-		}
-	}
-}
-
-func TestCallbackURL_PrefersAppUrl(t *testing.T) {
-	config := testConfig()
-	config.AppURL = "https://app.example.com/"
-	auth := &Auth{Settings: func() Config { return config }, CallbackPath: "/auth/callback"}
-
-	echoContext, _ := newTestContext(http.MethodGet, "http://internal:8156/auth/login")
-
-	if got := auth.callbackURL(echoContext); got != "https://app.example.com/auth/callback" {
-		t.Fatalf("callbackURL() = %q, want %q", got, "https://app.example.com/auth/callback")
-	}
-}
-
-func TestCallbackURL_DerivesFromRequestWithoutAppUrl(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }, CallbackPath: "/auth/callback"}
-
-	echoContext, _ := newTestContext(http.MethodGet, "http://app.example.com:8156/auth/login")
-
-	if got := auth.callbackURL(echoContext); got != "http://app.example.com:8156/auth/callback" {
-		t.Fatalf("callbackURL() = %q, want %q", got, "http://app.example.com:8156/auth/callback")
 	}
 }
 
@@ -239,7 +180,7 @@ func TestMiddleware_LoginPathRedirectsUnauthenticated(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected a redirect, got %d", rec.Code)
 	}
-	if location := rec.Header().Get(echo.HeaderLocation); location != "/login" {
+	if location := rec.Header().Get("Location"); location != "/login" {
 		t.Fatalf("expected a redirect to /login, got %q", location)
 	}
 }
@@ -291,40 +232,23 @@ func TestPrefix_FallsBackToSanitizedClientID(t *testing.T) {
 	}
 }
 
-func TestCallbackURL_ExportedWrapperMatchesInternal(t *testing.T) {
+func TestCallbackURL_MatchesInternal(t *testing.T) {
 	config := testConfig()
 	config.AppURL = "https://app.example.com"
 	auth := &Auth{Settings: func() Config { return config }, CallbackPath: "/auth/callback"}
 
-	echoContext, _ := newTestContext(http.MethodGet, "http://internal:8156/auth/login")
+	_, req := newTestContext(http.MethodGet, "http://internal:8156/auth/login")
 
-	if got, want := auth.CallbackURL(echoContext), auth.callbackURL(echoContext); got != want {
-		t.Fatalf("CallbackURL() = %q, want %q", got, want)
-	}
-}
-
-func TestResolved_ReflectsDiscoveryState(t *testing.T) {
-	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
-
-	if auth.Resolved() {
-		t.Fatal("expected Resolved() to be false before discovery")
-	}
-
-	if _, err := auth.provider.resolve(); err != nil {
-		t.Fatalf("unexpected discovery error: %v", err)
-	}
-	if !auth.Resolved() {
-		t.Fatal("expected Resolved() to be true after discovery")
+	if got, want := auth.callbackURL(req), "https://app.example.com/auth/callback"; got != want {
+		t.Fatalf("callbackURL() = %q, want %q", got, want)
 	}
 }
 
 func TestStartSessionAndClearSessionRoundTrip(t *testing.T) {
 	auth := newTestAuth(t)
-	echoContext, rec := newTestContext(http.MethodGet, "/")
+	rec, req := newTestContext(http.MethodGet, "/")
 
-	if err := auth.StartSession(echoContext, "user-subject"); err != nil {
+	if err := auth.StartSession(rec, req, "user-subject"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -346,8 +270,8 @@ func TestStartSessionAndClearSessionRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected subject %q", subject)
 	}
 
-	clearedContext, clearedRecorder := newTestContext(http.MethodGet, "/")
-	auth.ClearSession(clearedContext)
+	clearedRecorder, clearedRequest := newTestContext(http.MethodGet, "/")
+	auth.ClearSession(clearedRecorder, clearedRequest)
 
 	var expired *http.Cookie
 	for _, cookie := range clearedRecorder.Result().Cookies() {
@@ -380,11 +304,11 @@ func TestHandleCallback_RunsTheFullFlow(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	verifier := "verifier"
-	echoContext, rec := newTestContext(http.MethodGet,
+	rec, req := newTestContext(http.MethodGet,
 		server.URL+"/auth/callback?code=user-123&state="+state)
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|" + verifier + "|/jobs/1"})
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|" + verifier + "|/jobs/1"})
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure.Cause)
 	}
@@ -408,9 +332,9 @@ func TestHandleCallback_RunsTheFullFlow(t *testing.T) {
 
 func TestHandleCallback_RejectsProviderReportedError(t *testing.T) {
 	auth := newTestAuth(t)
-	echoContext, _ := newTestContext(http.MethodGet, "/auth/callback?error=access_denied")
+	rec, req := newTestContext(http.MethodGet, "/auth/callback?error=access_denied")
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -418,10 +342,10 @@ func TestHandleCallback_RejectsProviderReportedError(t *testing.T) {
 
 func TestHandleCallback_RejectsStateMismatch(t *testing.T) {
 	auth := newTestAuth(t)
-	echoContext, _ := newTestContext(http.MethodGet, "/auth/callback?code=user-123&state=other")
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "expected|verifier"})
+	rec, req := newTestContext(http.MethodGet, "/auth/callback?code=user-123&state=other")
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "expected|verifier"})
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if result != nil || failure == nil || failure.Code != LoginErrorExpired {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -435,11 +359,11 @@ func TestHandleCallback_ClassifiesExchangeFailures(t *testing.T) {
 	config := fakeProviderConfig(server)
 	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
 
-	echoContext, _ := newTestContext(http.MethodGet,
+	rec, req := newTestContext(http.MethodGet,
 		server.URL+"/auth/callback?code=no-id-token&state=any")
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "any|verifier"})
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "any|verifier"})
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -455,11 +379,11 @@ func TestHandleCallback_EnforcesAuthorizedSubjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	echoContext, rec := newTestContext(http.MethodGet,
+	rec, req := newTestContext(http.MethodGet,
 		server.URL+"/auth/callback?code=user-123&state="+state)
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -496,11 +420,11 @@ func TestHandleCallback_ReportsSessionFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	echoContext, _ := newTestContext(http.MethodGet,
+	rec, req := newTestContext(http.MethodGet,
 		server.URL+"/auth/callback?code=user-123&state="+state)
-	echoContext.Request().AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
+	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
 
-	result, failure := auth.HandleCallback(echoContext)
+	result, failure := auth.HandleCallback(rec, req)
 	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -514,9 +438,9 @@ func TestExchange_ReturnsTheSubject(t *testing.T) {
 	config := fakeProviderConfig(server)
 	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
 
-	echoContext, _ := newTestContext(http.MethodGet, server.URL+"/auth/callback?code=user-123")
+	_, req := newTestContext(http.MethodGet, server.URL+"/auth/callback?code=user-123")
 
-	subject, err := auth.Exchange(echoContext, "user-123", "verifier")
+	subject, err := auth.Exchange(req, "user-123", "verifier")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

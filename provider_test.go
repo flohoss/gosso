@@ -171,32 +171,35 @@ func TestRandomToken_ReturnsHexOfRequestedSize(t *testing.T) {
 	}
 }
 
-func TestAuth_ProviderResolveDiscoversTheProvider(t *testing.T) {
+func TestProvider_ResolveDiscoversTheProvider(t *testing.T) {
 	server := newFakeProvider(t)
 	config := fakeProviderConfig(server)
-	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+	provider := NewProvider(func() Config { return config })
 
-	resolved, err := auth.ProviderResolve()
+	resolved, err := provider.Resolve()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !resolved {
-		t.Fatal("expected ProviderResolve to report success")
+		t.Fatal("expected Resolve to report success")
 	}
-	if !auth.Resolved() {
+	if !provider.Resolved() {
 		t.Fatal("expected the provider to be resolved")
 	}
 }
 
-func TestAuth_ProviderResolveReportsUnreachableProvider(t *testing.T) {
+func TestProvider_ResolveReportsUnreachableProvider(t *testing.T) {
 	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+	provider := NewProvider(func() Config { return config })
 
-	resolved, err := auth.ProviderResolve()
+	resolved, err := provider.Resolve()
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
 	}
 	if resolved {
-		t.Fatal("expected ProviderResolve to report failure")
+		t.Fatal("expected Resolve to report failure")
+	}
+	if provider.Resolved() {
+		t.Fatal("expected the provider not to be resolved after a failure")
 	}
 }

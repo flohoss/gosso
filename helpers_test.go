@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"time"
-
-	"github.com/labstack/echo/v5"
 )
 
 const testSessionKey = "a-sufficiently-long-session-signing-key"
@@ -21,27 +19,24 @@ func testConfig() Config {
 	}
 }
 
-func newTestContext(method, target string) (*echo.Context, *httptest.ResponseRecorder) {
-	e := echo.New()
+func newTestContext(method, target string) (*httptest.ResponseRecorder, *http.Request) {
 	req := httptest.NewRequest(method, target, nil)
 	rec := httptest.NewRecorder()
 
-	return e.NewContext(req, rec), rec
+	return rec, req
 }
 
 func serveWithAuth(auth *Auth, target string, cookie string) *httptest.ResponseRecorder {
-	e := echo.New()
-	e.Use(auth.Middleware())
-	e.GET(target, func(c *echo.Context) error {
-		return c.NoContent(http.StatusOK)
-	})
+	handler := auth.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	if cookie != "" {
-		req.Header.Set(echo.HeaderCookie, cookie)
+		req.Header.Set("Cookie", cookie)
 	}
 	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	return rec
 }
