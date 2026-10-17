@@ -3,11 +3,9 @@ package gosso
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v5"
 	"golang.org/x/oauth2"
 )
 
@@ -16,7 +14,9 @@ const (
 	stateSeparator = "|"
 )
 
-// Auth runs the Echo v5 login lifecycle and the session middleware for a single app.
+// Auth runs the login lifecycle and the session middleware for a single app.
+// Handlers take the plain (http.ResponseWriter, *http.Request) pair so gosso
+// stays framework-agnostic.
 type Auth struct {
 	Sessions SessionManager
 
@@ -74,13 +74,13 @@ func (a *Auth) Enabled() bool {
 }
 
 // StartLogin writes the state cookie and redirects the browser to the provider.
-func (a *Auth) StartLogin(echoContext *echo.Context, redirect string) error {
+func (a *Auth) StartLogin(w http.ResponseWriter, r *http.Request, redirect string) error {
 	config := a.Settings()
 	if err := config.Validate(); err != nil {
 		return err
 	}
 
-	login, err := a.provider.Login(config, a.callbackURL(echoContext))
+	login, err := a.provider.Login(config, a.callbackURL(r))
 	if err != nil {
 		return err
 	}
@@ -97,10 +97,10 @@ func (a *Auth) StartLogin(echoContext *echo.Context, redirect string) error {
 		value += stateSeparator + redirect
 	}
 
-	a.clearLoginState(echoContext)
-	echoContext.SetCookie(a.stateCookie(value, int(stateCookieTTL.Seconds()), time.Time{}))
+	a.clearLoginState(w)
+	http.SetCookie(w, a.stateCookie(value, int(stateCookieTTL.Seconds()), time.Time{}))
 
-	echoContext.Redirect(http.StatusFound, login.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier)))
+	http.Redirect(w, r, login.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 
 	return nil
 }
@@ -108,10 +108,10 @@ func (a *Auth) StartLogin(echoContext *echo.Context, redirect string) error {
 // ConsumeLoginState validates and clears the state cookie and returns the state, PKCE verifier and redirect target.
 // The cookie is cleared before it is read on purpose: one-shot semantics come from the response
 // expiring it, while the request copy stays readable for this handler.
-func (a *Auth) ConsumeLoginState(echoContext *echo.Context) (state, verifier, redirect string, err error) {
-	a.clearLoginState(echoContext)
+func (a *Auth) ConsumeLoginState(w http.ResponseWriter, r *http.Request) (state, verifier, redirect string, err error) {
+	a.clearLoginState(w)
 
-	cookie, cookieErr := echoContext.Cookie(a.stateCookieName())
+	cookie, cookieErr := r.Cookie(a.stateCookieName())
 	if cookieErr != nil {
 		return "", "", "", ErrUnauthenticated
 	}
@@ -130,25 +130,25 @@ func (a *Auth) ConsumeLoginState(echoContext *echo.Context) (state, verifier, re
 }
 
 // Exchange redeems the authorization code and returns the verified subject of the id_token.
-func (a *Auth) Exchange(echoContext *echo.Context, code, verifier string) (string, error) {
+func (a *Auth) Exchange(r *http.Request, code, verifier string) (string, error) {
 	config := a.Settings()
 
-	return a.provider.Exchange(echoContext.Request().Context(), config, code, verifier, a.callbackURL(echoContext))
+	return a.provider.Exchange(r.Context(), config, code, verifier, a.callbackURL(r))
 }
 
 // StartSession stores a session for subject through the configured SessionManager.
-func (a *Auth) StartSession(echoContext *echo.Context, subject string) error {
-	return a.Sessions.Start(echoContext, subject, time.Now().Add(a.SessionTTL()))
+func (a *Auth) StartSession(w http.ResponseWriter, r *http.Request, subject string) error {
+	return a.Sessions.Start(w, r, subject, time.Now().Add(a.SessionTTL()))
 }
 
 // Authenticate resolves the current user from the session store.
-func (a *Auth) Authenticate(echoContext *echo.Context) (*User, error) {
-	return a.Sessions.Authenticate(echoContext)
+func (a *Auth) Authenticate(w http.ResponseWriter, r *http.Request) (*User, error) {
+	return a.Sessions.Authenticate(w, r)
 }
 
 // ClearSession removes the local session, without contacting the provider.
-func (a *Auth) ClearSession(echoContext *echo.Context) {
-	a.Sessions.Clear(echoContext)
+func (a *Auth) ClearSession(w http.ResponseWriter, r *http.Request) {
+	a.Sessions.Clear(w, r)
 }
 
 // SessionTTL returns the configured session lifetime, falling back to DefaultSessionTTL.
@@ -160,21 +160,21 @@ func (a *Auth) SessionTTL() time.Duration {
 // errors, consumes and checks the state cookie, exchanges the code, applies AuthorizeSubject
 // and starts the session. It returns the login result or a classified failure for the login
 // page redirect.
-func (a *Auth) HandleCallback(echoContext *echo.Context) (*LoginResult, *LoginFailure) {
-	if raw := echoContext.QueryParam("error"); raw != "" {
+func (a *Auth) HandleCallback(w http.ResponseWriter, r *http.Request) (*LoginResult, *LoginFailure) {
+	if raw := r.URL.Query().Get("error"); raw != "" {
 		return nil, &LoginFailure{Code: LoginErrorRejected, Cause: fmt.Errorf("provider reported %q", raw)}
 	}
 
-	state, verifier, redirect, err := a.ConsumeLoginState(echoContext)
+	state, verifier, redirect, err := a.ConsumeLoginState(w, r)
 	if err != nil {
 		return nil, &LoginFailure{Code: LoginErrorExpired, Cause: err}
 	}
 
-	if echoContext.QueryParam("state") != state {
+	if r.URL.Query().Get("state") != state {
 		return nil, &LoginFailure{Code: LoginErrorExpired, Cause: ErrStateMismatch}
 	}
 
-	subject, err := a.Exchange(echoContext, echoContext.QueryParam("code"), verifier)
+	subject, err := a.Exchange(r, r.URL.Query().Get("code"), verifier)
 	if err != nil {
 		return nil, &LoginFailure{Code: ClassifyLoginError(err), Cause: err}
 	}
@@ -183,7 +183,7 @@ func (a *Auth) HandleCallback(echoContext *echo.Context) (*LoginResult, *LoginFa
 		return nil, &LoginFailure{Code: LoginErrorRejected, Cause: ErrSubjectUnauthorized}
 	}
 
-	if err := a.StartSession(echoContext, subject); err != nil {
+	if err := a.StartSession(w, r, subject); err != nil {
 		return nil, &LoginFailure{Code: LoginErrorFailed, Cause: err}
 	}
 
@@ -195,23 +195,30 @@ func (a *Auth) HandleCallback(echoContext *echo.Context) (*LoginResult, *LoginFa
 }
 
 // Middleware redirects unauthenticated requests to LoginPath, or answers 401 when no login path is set.
-func (a *Auth) Middleware() echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+// It returns stdlib middleware; frameworks can wrap it, e.g. echo.WrapMiddleware or chi.Middleware.
+func (a *Auth) Middleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !a.Enabled() {
-				return next(c)
+				next.ServeHTTP(w, r)
+
+				return
 			}
 
-			if _, err := a.Authenticate(c); err != nil {
+			if _, err := a.Authenticate(w, r); err != nil {
 				if a.LoginPath == "" {
-					return echo.NewHTTPError(http.StatusUnauthorized, "Authentication required")
+					http.Error(w, "Authentication required", http.StatusUnauthorized)
+
+					return
 				}
 
-				return c.Redirect(http.StatusFound, a.LoginPath)
+				http.Redirect(w, r, a.LoginPath, http.StatusFound)
+
+				return
 			}
 
-			return next(c)
-		}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
@@ -233,71 +240,28 @@ func DefaultCookiePrefix(config Config) string {
 }
 
 func (a *Auth) stateCookie(value string, maxAge int, expires time.Time) *http.Cookie {
-	return CookieOptions{Secure: a.cookieSecure}.Cookie(a.stateCookieName(), value, maxAge, expires)
+	return a.Settings().CookieOptions().Cookie(a.stateCookieName(), value, maxAge, expires)
 }
 
-func (a *Auth) clearLoginState(echoContext *echo.Context) {
-	echoContext.SetCookie(a.stateCookie("", -1, time.Time{}))
+func (a *Auth) clearLoginState(w http.ResponseWriter) {
+	http.SetCookie(w, a.stateCookie("", -1, time.Time{}))
 }
 
-func (a *Auth) cookieSecure() bool {
-	return a.Settings().CookieSecure
-}
-
-// CallbackURL returns the redirect URI registered with the provider for this request.
-func (a *Auth) CallbackURL(c *echo.Context) string {
-	return a.callbackURL(c)
-}
-
-// Resolved reports whether provider discovery has already completed successfully.
-func (a *Auth) Resolved() bool {
-	a.provider.mu.Lock()
-	defer a.provider.mu.Unlock()
-
-	return a.provider.current != nil
-}
-
-// ProviderResolve resolves the provider now and reports whether discovery succeeded.
-func (a *Auth) ProviderResolve() (bool, error) {
-	_, err := a.provider.resolve()
-
-	return err == nil, err
-}
-
-func (a *Auth) callbackURL(c *echo.Context) string {
+func (a *Auth) callbackURL(r *http.Request) string {
 	if appURL := a.Settings().AppURL; appURL != "" {
 		return strings.TrimSuffix(appURL, "/") + a.CallbackPath
 	}
 
-	return c.Scheme() + "://" + c.Request().Host + a.CallbackPath
+	return Scheme(r) + "://" + r.Host + a.CallbackPath
 }
 
-// maxRedirectDecodePasses bounds how often SanitizeRedirect percent-decodes a target before
-// judging it, covering browsers that decode once per redirect hop.
-const maxRedirectDecodePasses = 3
+// Provider returns the OIDC provider behind this Auth, for apps that need to
+// inspect discovery state or force a resolve in their own tests or health checks.
+func (a *Auth) Provider() *Provider {
+	return a.provider
+}
 
-// SanitizeRedirect keeps only same-origin absolute paths and falls back to "/" for anything else.
-// Percent-encoded and backslash variants that browsers normalize back into protocol-relative
-// URLs, such as "/%2F%2Fevil.example.com", are rejected as well.
-func SanitizeRedirect(raw string) string {
-	if raw == "" || !strings.HasPrefix(raw, "/") {
-		return "/"
-	}
-
-	decoded := raw
-	for range maxRedirectDecodePasses {
-		unescaped, err := url.PathUnescape(decoded)
-		if err != nil || unescaped == decoded {
-			break
-		}
-
-		decoded = unescaped
-	}
-
-	if !strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, "//") ||
-		strings.Contains(decoded, "\\") || strings.ContainsRune(decoded, 0) {
-		return "/"
-	}
-
-	return raw
+// CallbackURL returns the redirect URI registered with the provider for this request.
+func (a *Auth) CallbackURL(r *http.Request) string {
+	return a.callbackURL(r)
 }

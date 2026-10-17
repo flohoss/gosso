@@ -51,11 +51,36 @@ func ClassifyLoginError(err error) LoginError {
 
 // ValidLoginErrorCode reports whether raw is one of the known LoginError codes.
 func ValidLoginErrorCode(raw string) bool {
-	switch LoginError(raw) {
+	return LoginError(raw).Valid()
+}
+
+// Valid reports whether the code is one of the known codes.
+func (l LoginError) Valid() bool {
+	switch l {
 	case LoginErrorRejected, LoginErrorExpired, LoginErrorUnavailable, LoginErrorFailed:
 		return true
 	default:
 		return false
+	}
+}
+
+// LogFailure logs a LoginFailure at the severity each code deserves: provider
+// rejections and expired state are routine warnings, outages and failures are
+// errors. Apps use it so their callback handlers do not duplicate the branching.
+func LogFailure(failure *LoginFailure) {
+	if failure == nil {
+		return
+	}
+
+	switch failure.Code {
+	case LoginErrorRejected:
+		logger.Load().Warn("OIDC provider rejected login", "error", failure.Cause)
+	case LoginErrorExpired:
+		logger.Load().Warn("OIDC login expired or state mismatch", "error", failure.Cause)
+	case LoginErrorUnavailable:
+		logger.Load().Error("OIDC provider unavailable", "error", failure.Cause)
+	default:
+		logger.Load().Error("OIDC login failed", "error", failure.Cause)
 	}
 }
 

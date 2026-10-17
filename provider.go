@@ -43,6 +43,21 @@ func (p *Provider) Warm() {
 	}()
 }
 
+// Resolved reports whether provider discovery has already completed successfully.
+func (p *Provider) Resolved() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.current != nil
+}
+
+// Resolve resolves the provider now and reports whether discovery succeeded.
+func (p *Provider) Resolve() (bool, error) {
+	_, err := p.resolve()
+
+	return err == nil, err
+}
+
 // resolve returns the cached provider state, rediscovering when the issuer or client ID changed.
 // Discovery failures are not cached and are retried on the next call.
 func (p *Provider) resolve() (*providerState, error) {

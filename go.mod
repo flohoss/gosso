@@ -1,10 +1,9 @@
-module github.com/flohoss/gosso
+module github.com/flohoss/gosso/v2
 
 go 1.27
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/labstack/echo/v5 v5.4.0
 	golang.org/x/oauth2 v0.37.0
 )
 

@@ -2,7 +2,11 @@
 // GoCron and friends: the browser handshake, state and session cookies, PKCE S256
 // code exchange against a discovered provider, and pluggable session storage.
 //
-// Start with Config for the issuer credentials and Auth for the Echo v5 routes and
+// The core is framework-agnostic: handlers and the SessionManager interface work
+// with the plain (http.ResponseWriter, *http.Request) pair, and Middleware returns
+// stdlib middleware that any router can wrap.
+//
+// Start with Config for the issuer credentials and Auth for the routes and
 // middleware. HandleCallback runs the whole callback choreography and returns either
 // a LoginResult or a classified LoginFailure for the login page redirect;
 // Auth.AuthorizeSubject can optionally refuse sessions for individual subjects.

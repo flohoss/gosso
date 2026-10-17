@@ -75,6 +75,13 @@ func (c Config) EffectiveSessionTTL() time.Duration {
 	return c.SessionTTL
 }
 
+// CookieOptions returns the shared cookie attributes for this config.
+func (c Config) CookieOptions() CookieOptions {
+	secure := c.CookieSecure
+
+	return CookieOptions{Secure: func() bool { return secure }}
+}
+
 // WithDefaults returns a copy with SessionTTL and Scopes filled in when they are empty.
 func (c Config) WithDefaults() Config {
 	filled := c

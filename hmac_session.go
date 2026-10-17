@@ -3,14 +3,14 @@ package gosso
 import (
 	"net/http"
 	"time"
-
-	"github.com/labstack/echo/v5"
 )
 
 // DefaultSessionTTL is the session lifetime used when Config.SessionTTL is not positive.
 const DefaultSessionTTL = 24 * time.Hour
 
-// HMACOptions configures NewHMACSessions. CookieName takes precedence over Prefix.
+// HMACOptions configures NewHMACSessions. When CookieName is empty the cookie is
+// named from Prefix; when Prefix is empty too, it falls back to DefaultCookiePrefix
+// of the settings, so the zero value still yields a usable cookie name.
 type HMACOptions struct {
 	Prefix     string
 	CookieName string
@@ -23,11 +23,15 @@ type HMACSessions struct {
 	settings   func() Config
 }
 
-// NewHMACSessions returns the cookie name from opts.CookieName, or opts.Prefix with "_session" appended.
+// NewHMACSessions returns the cookie name from opts.CookieName, opts.Prefix, or the
+// config-derived default prefix.
 func NewHMACSessions(opts HMACOptions) *HMACSessions {
 	name := opts.CookieName
 	if name == "" {
 		name = opts.Prefix + "_session"
+	}
+	if name == "_session" && opts.Settings != nil {
+		name = DefaultCookiePrefix(opts.Settings()) + "_session"
 	}
 
 	return &HMACSessions{
@@ -37,12 +41,12 @@ func NewHMACSessions(opts HMACOptions) *HMACSessions {
 }
 
 // Start writes the signed session cookie for subject, expiring at expiresAt.
-func (h *HMACSessions) Start(echoContext *echo.Context, subject string, expiresAt time.Time) error {
+func (h *HMACSessions) Start(w http.ResponseWriter, r *http.Request, subject string, expiresAt time.Time) error {
 	if err := ValidateSessionKey(h.settings().SessionKey); err != nil {
 		return err
 	}
 
-	echoContext.SetCookie(h.cookie(SignHMAC(h.settings().SessionKey, subject, expiresAt), 0, expiresAt))
+	http.SetCookie(w, h.cookie(SignHMAC(h.settings().SessionKey, subject, expiresAt), 0, expiresAt))
 
 	return nil
 }
@@ -50,8 +54,8 @@ func (h *HMACSessions) Start(echoContext *echo.Context, subject string, expiresA
 // Authenticate verifies the session cookie and refreshes it once half the TTL has passed.
 // Sessions are stateless by design: they cannot be revoked before their expiry, so back them
 // with a custom SessionManager when immediate revocation matters.
-func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
-	cookie, err := echoContext.Cookie(h.cookieName)
+func (h *HMACSessions) Authenticate(w http.ResponseWriter, r *http.Request) (*User, error) {
+	cookie, err := r.Cookie(h.cookieName)
 	if err != nil || cookie.Value == "" {
 		return nil, ErrUnauthenticated
 	}
@@ -66,14 +70,14 @@ func (h *HMACSessions) Authenticate(echoContext *echo.Context) (*User, error) {
 		return nil, ErrUnauthenticated
 	}
 
-	h.refresh(echoContext, subject, expiresAt)
+	h.refresh(w, r, subject, expiresAt)
 
 	return &User{Subject: subject}, nil
 }
 
 // Clear expires the session cookie.
-func (h *HMACSessions) Clear(echoContext *echo.Context) error {
-	echoContext.SetCookie(h.cookie("", -1, time.Time{}))
+func (h *HMACSessions) Clear(w http.ResponseWriter, r *http.Request) error {
+	http.SetCookie(w, h.cookie("", -1, time.Time{}))
 
 	return nil
 }
@@ -83,24 +87,16 @@ func (h *HMACSessions) CookieName() string {
 	return h.cookieName
 }
 
-func (h *HMACSessions) refresh(echoContext *echo.Context, subject string, expiresAt time.Time) {
+func (h *HMACSessions) refresh(w http.ResponseWriter, r *http.Request, subject string, expiresAt time.Time) {
 	ttl := h.settings().EffectiveSessionTTL()
-	if ttl <= 0 {
-		return
-	}
-
-	if time.Until(expiresAt) >= h.settings().EffectiveSessionTTL()/2 {
+	if time.Until(expiresAt) >= ttl/2 {
 		return
 	}
 
 	renewed := time.Now().Add(ttl)
-	echoContext.SetCookie(h.cookie(SignHMAC(h.settings().SessionKey, subject, renewed), 0, renewed))
+	http.SetCookie(w, h.cookie(SignHMAC(h.settings().SessionKey, subject, renewed), 0, renewed))
 }
 
 func (h *HMACSessions) cookie(value string, maxAge int, expires time.Time) *http.Cookie {
-	return CookieOptions{Secure: h.secure}.Cookie(h.cookieName, value, maxAge, expires)
-}
-
-func (h *HMACSessions) secure() bool {
-	return h.settings().CookieSecure
+	return h.settings().CookieOptions().Cookie(h.cookieName, value, maxAge, expires)
 }

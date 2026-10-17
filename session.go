@@ -3,8 +3,6 @@ package gosso
 import (
 	"net/http"
 	"time"
-
-	"github.com/labstack/echo/v5"
 )
 
 // User is the authenticated identity derived from a session.
@@ -14,9 +12,9 @@ type User struct {
 
 // SessionManager stores and reads the session behind a request so apps can swap in their own store.
 type SessionManager interface {
-	Start(echoContext *echo.Context, subject string, expiresAt time.Time) error
-	Authenticate(echoContext *echo.Context) (*User, error)
-	Clear(echoContext *echo.Context) error
+	Start(w http.ResponseWriter, r *http.Request, subject string, expiresAt time.Time) error
+	Authenticate(w http.ResponseWriter, r *http.Request) (*User, error)
+	Clear(w http.ResponseWriter, r *http.Request) error
 	CookieName() string
 }
 
@@ -42,4 +40,18 @@ func (o CookieOptions) Cookie(name, value string, maxAge int, expires time.Time)
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	}
+}
+
+// Scheme reports the request scheme without a framework: X-Forwarded-Proto wins, then TLS.
+// Apps behind proxies that do not forward the original scheme should set Config.AppURL.
+func Scheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+
+	if r.TLS != nil {
+		return "https"
+	}
+
+	return "http"
 }
