@@ -8,7 +8,7 @@ The core is framework-agnostic: every handler takes the plain `(http.ResponseWri
 ## Install
 
 ```sh
-go get github.com/flohoss/gosso/v2@v2.0.0
+go get github.com/flohoss/gosso/v2@v2.0.1
 ```
 
 Requires Go 1.27.3 or newer.
