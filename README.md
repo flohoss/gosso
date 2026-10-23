@@ -11,7 +11,7 @@ The core is framework-agnostic: every handler takes the plain `(http.ResponseWri
 go get github.com/flohoss/gosso/v2@v2.0.0
 ```
 
-Requires Go 1.27 or newer.
+Requires Go 1.27.3 or newer.
 
 ## What it provides
 
