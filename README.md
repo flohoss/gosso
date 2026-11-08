@@ -1,82 +1,83 @@
-<a href="https://pkg.go.dev/github.com/flohoss/gosso/v2"><img src="https://pkg.go.dev/badge/github.com/flohoss/gosso/v2.svg" alt="Go Reference"></a>
+<a href="https://pkg.go.dev/github.com/flohoss/gosso/v3"><img src="https://pkg.go.dev/badge/github.com/flohoss/gosso/v3.svg" alt="Go Reference"></a>
 [![CI](https://github.com/flohoss/gosso/actions/workflows/ci.yml/badge.svg)](https://github.com/flohoss/gosso/actions/workflows/ci.yml)
 
-Shared OpenID Connect login package used by [GoDash](https://github.com/flohoss/godash), [GoCron](https://github.com/flohoss/gocron) and friends. One implementation of the browser handshake, cookie handling and session strategies so the apps behave identically: separate login page, `/auth/callback`, PKCE S256, state cookie, optional `app_url` for redirect- and proxy-safe callback URLs.
+Shared OpenID Connect login used by [GoCron](https://github.com/flohoss/gocron) and [GoRss](https://github.com/flohoss/gorss). One implementation of the browser handshake, cookie handling, SQLite session store and auth routes so the apps behave identically: separate login page, `/api/auth/callback`, PKCE S256, state cookie, optional `app_url` for redirect- and proxy-safe callback URLs.
 
-The core is framework-agnostic: every handler takes the plain `(http.ResponseWriter, *http.Request)` pair and `Middleware` returns `func(http.Handler) http.Handler`, so it works with net/http, Echo, chi, gin and friends.
+The package is Echo- and Huma-native: `Auth.Mount` registers the lifecycle routes, publishes the session cookie as an OpenAPI security scheme and returns the Huma API bound to the session-protected group. `main.go` initializes it once with `gosso.Options`.
 
 ## Install
 
 ```sh
-go get github.com/flohoss/gosso/v2@v2.0.1
+go get github.com/flohoss/gosso/v3
 ```
 
 Requires Go 1.27.3 or newer.
 
 ## What it provides
 
-- `Config` — issuer, client credentials, session TTL, `cookie_secure`, `app_url`, cookie prefix. `Validate()` enforces issuer/secret/session-key rules.
-- `Auth` — the login lifecycle and session middleware:
-  - `StartLogin(w, r, redirect)` — sets the `*_oidc_state` cookie (state + PKCE verifier + optional redirect target, HttpOnly, SameSite=Lax, 10 minute TTL) and 302s to the provider.
-  - `HandleCallback(w, r)` — runs the whole callback choreography: provider-reported errors, state cookie consumption and match, code exchange with PKCE, the optional `AuthorizeSubject` gate and the session start. Returns either `*LoginResult{Subject, Redirect}` or `*LoginFailure{Code, Cause}` for the login page redirect.
-  - `Exchange(r, code, verifier)` — code exchange and `id_token` verification on its own, returns the subject.
-  - `Authenticate(w, r)`, `ClearSession(w, r)`, `StartSession(w, r, subject)`, `SessionTTL`, `CallbackURL(r)`.
-  - `Middleware()` — stdlib middleware; unauthenticated requests are redirected to `LoginPath`, or answered with 401 when no login path is set.
-- `SessionManager` interface — bring your own store (DB-backed jti, like GoCron's SQLite sessions) or use the built-in:
-- `HMACSessions` — stateless signed cookie (`subject|expiry` + HMAC-SHA256, base64url), sliding refresh once half the TTL has passed. Requires a `SessionKey` of at least 32 characters (`gosso/v2.MinSessionKeyLength`). Stateless cookies cannot be revoked before their expiry — implement `SessionManager` when immediate revocation matters.
-- `LoginError` codes (`rejected`, `expired`, `unavailable`, `failed`), `ClassifyLoginError(err)` and `LogFailure(failure)` so every handler redirects and logs with the same codes and severities.
-- Lazy background discovery (`provider.Warm`) with a 10 second timeout; failed discovery is retried on the next request instead of being cached. `auth.Provider().Resolved()` and `.Resolve()` expose the state for health checks.
+- `Options` — issuer, client credentials, session TTL, `cookie_secure`, `app_url`, cookie prefix/name, login path, scopes and the `*sql.DB` for the session store. `Validate()` enforces the issuer rules.
+- `New(Options)` — validates, creates the `sso_sessions` table and warms provider discovery in the background. A disabled instance still builds, so SSO can be shipped off and enabled by config.
+- `Auth.Mount(e, humaConfig)` — registers `GET /api/auth/login`, `GET /api/auth/callback`, adds `cookieAuth` to the OpenAPI security schemes and returns a `huma.API` whose routes run behind the session middleware. Also mounts the public `POST /api/auth/logout` and `GET /api/auth/me`.
+- `Auth.Middleware()` — Echo group middleware; unauthenticated requests are redirected to `Options.LoginPath`, or answered with 401 when it is empty.
+- `Auth.Authenticate(c)`, `Auth.ClearSession(c)`, `Auth.StartLogin(c, redirect)`, `Auth.HandleCallback(c)`, `Auth.SessionCookieName()`.
+- `Auth.Cleanup(ctx)` — deletes expired sessions immediately, then hourly until the context is done.
+- `LoginError` codes (`rejected`, `expired`, `unavailable`, `failed`), `ClassifyLoginError(err)`, `LoginPageURL(code)` and `LogFailure(failure)` so handlers redirect and log with the same codes and severities.
+- Lazy background discovery with a 10 second timeout; failed discovery is retried on the next request instead of being cached. `Auth.Provider().Resolved()` and `.Resolve()` expose the state for health checks.
+
+## Usage
+
+```go
+auth, err := gosso.New(gosso.Options{
+	Enabled:      config.GetAuth().OIDC.Enabled,
+	IssuerURL:    config.GetAuth().OIDC.IssuerURL,
+	ClientID:     config.GetAuth().OIDC.ClientID,
+	ClientSecret: config.GetAuth().OIDC.ClientSecret,
+	SessionTTL:   config.GetAuth().OIDC.SessionTTL,
+	CookieSecure: config.GetAuth().OIDC.CookieSecure,
+	LoginPath:    "/login",
+	AppURL:       config.GetAppUrl(),
+	DB:           db,
+})
+if err != nil {
+	slog.Error(err.Error())
+	os.Exit(1)
+}
+
+go auth.Cleanup(ctx)
+
+e := echo.New()
+e.Use(gosso.EchoContextMiddleware)
+
+api := auth.Mount(e, huma.DefaultConfig("My API", buildinfo.Version))
+huma.Register(api, listItemsOperation(), listItemsHandler) // requires a login
+
+// The SPA shell is not behind the middleware; check it explicitly.
+e.GET("/login", loginPage)
+e.GET("/*", func(c *echo.Context) error {
+	if auth.Enabled() {
+		if _, err := auth.Authenticate(c); err != nil {
+			return c.Redirect(http.StatusFound, gosso.LoginPagePath)
+		}
+	}
+
+	return c.Render(http.StatusOK, "index.html", nil)
+})
+```
+
+`EchoContextMiddleware` stores the Echo context on the request so Huma handlers, which
+only receive a `context.Context`, can reach the response cookies through
+`gosso.EchoContextFrom(ctx)`.
 
 ## Cookie naming
 
-Cookies are `<cookie_prefix>_oidc_state` (from `Config.CookiePrefix`, which defaults to the client ID) and the session cookie named by your `SessionManager`. `HMACSessions` takes the name from `HMACOptions.CookieName`, or `HMACOptions.Prefix` + `_session`. Give each app a distinct client ID (or set the prefix/name) to avoid collisions on a shared domain.
-
-## Usage sketch
-
-```go
-sessions := gosso.NewHMACSessions(gosso.HMACOptions{
-	Prefix:   "myapp",
-	Settings: func() gosso.Config { return config.SSO() },
-})
-
-auth := gosso.New(
-	func() gosso.Config { return config.SSO() },
-	sessions,
-	"/auth/callback",
-	"/login",
-)
-
-mux := http.NewServeMux()
-mux.HandleFunc("GET /login", loginPage)
-mux.HandleFunc("GET /auth/oidc", func(w http.ResponseWriter, r *http.Request) {
-	if err := auth.StartLogin(w, r, r.URL.Query().Get("redirect")); err != nil {
-		http.Redirect(w, r, "/login?error="+string(gosso.ClassifyLoginError(err)), http.StatusFound)
-	}
-})
-mux.HandleFunc("GET /auth/callback", func(w http.ResponseWriter, r *http.Request) {
-	result, failure := auth.HandleCallback(w, r)
-	if failure != nil {
-		gosso.LogFailure(failure)
-		http.Redirect(w, r, "/login?error="+string(failure.Code), http.StatusFound)
-
-		return
-	}
-
-	slog.Info("User logged in", "subject", result.Subject)
-	http.Redirect(w, r, result.Redirect, http.StatusFound)
-})
-
-// Protect everything else: 302 to /login, or 401 when LoginPath is empty.
-http.ListenAndServe(":8443", auth.Middleware()(mux))
-```
-
-Settings should come from the app config so hot reloads take effect; read them through the `func() Config` indirection.
-
-Frameworks wrap the middleware instead of mounting the handler: `echo.WrapMiddleware(auth.Middleware())`, `chi.Middleware(auth.Middleware())` or the framework's equivalent.
+The state cookie is `<cookie_prefix>_oidc_state`, where `cookie_prefix` defaults to the
+sanitized client ID; the session cookie is `<cookie_prefix>_session` unless `Options.CookieName`
+is set. Give each app a distinct client ID (or set the prefix) to avoid collisions on a shared domain.
 
 ## Logout
 
-`ClearSession` only clears the local session — no round-trip to a provider `end_session_endpoint`. For DB-backed stores also delete the stored session row before clearing the cookie.
+Logout revokes the stored session row and expires the cookie; there is no round-trip to a
+provider `end_session_endpoint`.
 
 ## License
 
