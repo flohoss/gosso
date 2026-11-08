@@ -1,22 +1,52 @@
 package gosso
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"testing"
 	"time"
+
+	_ "github.com/glebarez/go-sqlite"
+	"github.com/labstack/echo/v5"
 )
 
-const testSessionKey = "a-sufficiently-long-session-signing-key"
-
-func testConfig() Config {
-	return Config{
+func testOptions() Options {
+	return Options{
 		Enabled:      true,
 		IssuerURL:    "https://sso.example.com",
 		ClientID:     "test-client",
 		ClientSecret: "test-secret",
-		SessionKey:   testSessionKey,
 		SessionTTL:   time.Hour,
+		LoginPath:    LoginPagePath,
 	}
+}
+
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "sso.sqlite"))
+	if err != nil {
+		t.Fatalf("failed to open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	return db
+}
+
+func newTestAuth(t *testing.T) *Auth {
+	t.Helper()
+
+	opts := testOptions()
+	opts.DB = newTestDB(t)
+
+	auth, err := New(opts)
+	if err != nil {
+		t.Fatalf("failed to create auth: %v", err)
+	}
+
+	return auth
 }
 
 func newTestContext(method, target string) (*httptest.ResponseRecorder, *http.Request) {
@@ -26,17 +56,88 @@ func newTestContext(method, target string) (*httptest.ResponseRecorder, *http.Re
 	return rec, req
 }
 
-func serveWithAuth(auth *Auth, target string, cookie string) *httptest.ResponseRecorder {
-	handler := auth.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func echoContext(rec *httptest.ResponseRecorder, req *http.Request) *echo.Context {
+	router := echo.New()
+	c := router.NewContext(req, rec)
 
-	req := httptest.NewRequest(http.MethodGet, target, nil)
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	return c
+}
+
+func serveMiddleware(auth *Auth, rec *httptest.ResponseRecorder, req *http.Request) *httptest.ResponseRecorder {
+	router := echo.New()
+	router.Use(auth.Middleware())
+	router.GET("/*", func(c *echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
+	router.ServeHTTP(rec, req)
 
 	return rec
+}
+
+func stateCookieOf(t *testing.T, cookies []*http.Cookie, auth *Auth) *http.Cookie {
+	t.Helper()
+
+	return cookieNamed(t, cookies, auth.opts.stateCookieName())
+}
+
+func sessionCookieOf(t *testing.T, cookies []*http.Cookie, auth *Auth) *http.Cookie {
+	t.Helper()
+
+	return cookieNamed(t, cookies, auth.opts.CookieName)
+}
+
+func cookieNamed(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
+	t.Helper()
+
+	var found *http.Cookie
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			found = cookie
+		}
+	}
+
+	return found
+}
+
+func startTestSession(t *testing.T, auth *Auth, subject string) *http.Cookie {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	if err := auth.sessions.start(rec, req, subject); err != nil {
+		t.Fatalf("failed to start a session: %v", err)
+	}
+
+	cookie := sessionCookieOf(t, rec.Result().Cookies(), auth)
+	if cookie == nil {
+		t.Fatal("expected a session cookie")
+	}
+
+	return cookie
+}
+
+func handleCallback(auth *Auth, target string) (*LoginResult, *LoginFailure) {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+
+	return auth.HandleCallback(echoContext(httptest.NewRecorder(), req))
+}
+
+func handleCallbackWithCookie(auth *Auth, target, stateValue string) (*LoginResult, *LoginFailure) {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.AddCookie(&http.Cookie{Name: auth.opts.stateCookieName(), Value: stateValue})
+
+	return auth.HandleCallback(echoContext(httptest.NewRecorder(), req))
+}
+
+func callbackOf(t *testing.T, auth *Auth, server *httptest.Server, stateCookieValue, query string) (*httptest.ResponseRecorder, *LoginResult, *LoginFailure) {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, server.URL+CallbackRoute+query, nil)
+	req.AddCookie(&http.Cookie{Name: auth.opts.stateCookieName(), Value: stateCookieValue})
+
+	result, failure := auth.HandleCallback(echoContext(rec, req))
+
+	return rec, result, failure
 }

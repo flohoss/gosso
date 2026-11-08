@@ -1,10 +1,13 @@
 package gosso
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -60,4 +63,55 @@ func TestSetLogger_ReplacesTheLogger(t *testing.T) {
 	if logger.Load() != replacement {
 		t.Fatal("expected the logger to be replaced")
 	}
+}
+
+func TestLogFailure_CoversEveryCode(t *testing.T) {
+	var buffer syncBuffer
+	previous := logger.Load()
+	t.Cleanup(func() { SetLogger(previous) })
+	SetLogger(slog.New(slog.NewTextHandler(&buffer, nil)))
+
+	for _, failure := range []*LoginFailure{
+		{Code: LoginErrorRejected, Cause: errors.New("provider said no")},
+		{Code: LoginErrorExpired, Cause: ErrStateMismatch},
+		{Code: LoginErrorUnavailable, Cause: ErrProviderUnavailable},
+		{Code: LoginErrorFailed, Cause: errors.New("boom")},
+	} {
+		LogFailure(failure)
+	}
+
+	logged := buffer.String()
+	for _, want := range []string{
+		"level=WARN msg=\"OIDC provider rejected login\"",
+		"level=WARN msg=\"OIDC login expired or state mismatch\"",
+		"level=ERROR msg=\"OIDC provider unavailable\"",
+		"level=ERROR msg=\"OIDC login failed\"",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("expected %q in the log output", want)
+		}
+	}
+}
+
+func TestLogFailure_IgnoresNil(t *testing.T) {
+	LogFailure(nil)
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	raw bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.raw.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.raw.String()
 }
