@@ -23,6 +23,10 @@ func TestSanitizeRedirect(t *testing.T) {
 		{name: "backslash", raw: "/\\evil", valid: "/"},
 		{name: "backslash in path", raw: "/jobs/\\..\\admin", valid: "/"},
 		{name: "nul byte", raw: "/\x00evil", valid: "/"},
+		{name: "crlf header injection", raw: "/x\r\nSet-Cookie: pwned=1; Path=/", valid: "/"},
+		{name: "encoded crlf header injection", raw: "/x%0D%0ASet-Cookie:%20pwned=1", valid: "/"},
+		{name: "lone lf", raw: "/x\nEvil", valid: "/"},
+		{name: "lone cr", raw: "/x\rEvil", valid: "/"},
 	}
 
 	for _, tc := range cases {
