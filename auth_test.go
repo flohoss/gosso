@@ -308,7 +308,7 @@ func TestHandleCallback_ReportsSessionFailures(t *testing.T) {
 	server := newFakeProvider(t)
 	auth := newTestAuthForProvider(t, server)
 
-	auth.sessions.db.Close()
+	_ = auth.sessions.db.Close()
 
 	_, result, failure := callbackOf(t, auth, server,
 		"state-value|verifier", "?code=user-123&state=state-value")

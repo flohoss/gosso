@@ -2,7 +2,6 @@ package gosso
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -27,13 +26,13 @@ func (a *Auth) Mount(e *echo.Echo, config huma.Config) huma.API {
 	if config.OpenAPI == nil {
 		config.OpenAPI = &huma.OpenAPI{}
 	}
-	if config.OpenAPI.Components == nil {
-		config.OpenAPI.Components = &huma.Components{}
+	if config.Components == nil {
+		config.Components = &huma.Components{}
 	}
-	if config.OpenAPI.Components.SecuritySchemes == nil {
-		config.OpenAPI.Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
+	if config.Components.SecuritySchemes == nil {
+		config.Components.SecuritySchemes = map[string]*huma.SecurityScheme{}
 	}
-	config.OpenAPI.Components.SecuritySchemes[SecurityScheme] = &huma.SecurityScheme{
+	config.Components.SecuritySchemes[SecurityScheme] = &huma.SecurityScheme{
 		Type:        "apiKey",
 		Name:        a.opts.CookieName,
 		In:          "cookie",
@@ -59,7 +58,7 @@ func (a *Auth) loginHandler(c *echo.Context) error {
 	}
 
 	if err := a.StartLogin(c, c.QueryParam("redirect")); err != nil {
-		slog.Error("Failed to start login", "error", err)
+		logger.Load().Error("Failed to start login", "error", err)
 
 		return c.Redirect(http.StatusFound, LoginPageURL(ClassifyLoginError(err)))
 	}
@@ -79,7 +78,7 @@ func (a *Auth) callbackHandler(c *echo.Context) error {
 		return c.Redirect(http.StatusFound, LoginPageURL(failure.Code))
 	}
 
-	slog.Info("User logged in", "subject", result.Subject)
+	logger.Load().Info("User logged in", "subject", result.Subject)
 
 	return c.Redirect(http.StatusFound, result.Redirect)
 }

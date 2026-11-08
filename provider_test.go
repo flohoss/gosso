@@ -51,24 +51,24 @@ func newFakeProvider(t *testing.T) *httptest.Server {
 
 		switch code := r.Form.Get("code"); code {
 		case "no-id-token":
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer"})
 		case "bad-id-token":
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "id_token": "not-a-jwt"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "id_token": "not-a-jwt"})
 		case "no-subject":
 			claims := fmt.Sprintf(`{"iss":%q,"aud":%q,"exp":%d}`,
 				server.URL, testOptions().ClientID, time.Now().Add(time.Hour).Unix())
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"access_token": "access",
 				"token_type":   "Bearer",
 				"id_token":     oidctest.SignIDToken(privateKey, testKeyID, oidc.RS256, claims),
 			})
 		case "invalid-code":
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"})
 		default:
 			claims := fmt.Sprintf(`{"iss":%q,"aud":%q,"sub":%q,"exp":%d}`,
 				server.URL, testOptions().ClientID, code, time.Now().Add(time.Hour).Unix())
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"access_token": "access",
 				"token_type":   "Bearer",
 				"id_token":     oidctest.SignIDToken(privateKey, testKeyID, oidc.RS256, claims),

@@ -210,7 +210,7 @@ func TestNew_ReportsSessionStoreFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open the database: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	opts := testOptions()
 	opts.DB = db

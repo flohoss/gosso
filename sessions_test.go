@@ -20,7 +20,7 @@ func TestNewSessionStore_CreatesTheStore(t *testing.T) {
 
 func TestSessionStore_StartReportsInsertFailures(t *testing.T) {
 	auth := newTestAuth(t)
-	auth.sessions.db.Close()
+	_ = auth.sessions.db.Close()
 
 	rec, req := newTestContext(http.MethodGet, "/")
 	if err := auth.sessions.start(rec, req, "user-subject"); err == nil {
@@ -31,7 +31,7 @@ func TestSessionStore_StartReportsInsertFailures(t *testing.T) {
 func TestSessionStore_ClearSurvivesDatabaseFailures(t *testing.T) {
 	auth := newTestAuth(t)
 	cookie := startTestSession(t, auth, "user-subject")
-	auth.sessions.db.Close()
+	_ = auth.sessions.db.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(cookie)
@@ -52,7 +52,7 @@ func TestSessionStore_DeleteExpiredReportsErrors(t *testing.T) {
 		t.Fatalf("expected an empty store, got %d sessions", count)
 	}
 
-	auth.sessions.db.Close()
+	_ = auth.sessions.db.Close()
 	auth.sessions.deleteExpired()
 }
 
@@ -61,7 +61,7 @@ func TestNewSessionStore_ReportsDatabaseFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open the database: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	opts := testOptions()
 	opts.DB = db
@@ -69,7 +69,7 @@ func TestNewSessionStore_ReportsDatabaseFailures(t *testing.T) {
 
 	// A closed database cannot create the session table or its index.
 	store, creationErr := func() (*sessionStore, error) {
-		db.Close()
+		_ = db.Close()
 		return newSessionStore(opts)
 	}()
 	if creationErr == nil {

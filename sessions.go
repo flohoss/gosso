@@ -26,9 +26,6 @@ const (
 	deleteExpiredSessions = `DELETE FROM sso_sessions WHERE expires_at < ?`
 )
 
-// sessionTokenSize is the number of random bytes behind a session identifier.
-const sessionTokenSize = 32
-
 type sessionStore struct {
 	db       *sql.DB
 	cookie   string
