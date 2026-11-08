@@ -1,19 +1,30 @@
-// Package gosso implements the shared OpenID Connect login flow used by GoDash,
-// GoCron and friends: the browser handshake, state and session cookies, PKCE S256
-// code exchange against a discovered provider, and pluggable session storage.
+// Package gosso implements the shared OpenID Connect login used by GoCron and GoRss:
+// the browser handshake, the state cookie, PKCE S256 code exchange against a
+// discovered provider, the login/logout/me routes and a SQLite-backed session store.
 //
-// The core is framework-agnostic: handlers and the SessionManager interface work
-// with the plain (http.ResponseWriter, *http.Request) pair, and Middleware returns
-// stdlib middleware that any router can wrap.
+// The package is Echo-native. Mount registers the lifecycle routes, publishes the
+// session cookie as an OpenAPI security scheme and returns the Huma API of the
+// session-protected group, so an app registers its own operations on it and they
+// require a login:
 //
-// Start with Config for the issuer credentials and Auth for the routes and
-// middleware. HandleCallback runs the whole callback choreography and returns either
-// a LoginResult or a classified LoginFailure for the login page redirect;
-// Auth.AuthorizeSubject can optionally refuse sessions for individual subjects.
-// HMACSessions is the built-in signed-cookie SessionManager — its sessions are
-// stateless and cannot be revoked before their expiry. Implement SessionManager to
-// back sessions with your own store when immediate revocation matters.
+//	auth, err := gosso.New(gosso.Options{
+//		Enabled:      cfg.Enabled,
+//		IssuerURL:    cfg.IssuerURL,
+//		ClientID:     cfg.ClientID,
+//		ClientSecret: cfg.ClientSecret,
+//		SessionTTL:   cfg.SessionTTL,
+//		CookieSecure: cfg.CookieSecure,
+//		AppURL:       cfg.AppURL,
+//		DB:           db,
+//	})
+//	if err != nil {
+//		return err
+//	}
 //
-// Settings are read through a func() Config indirection so apps can reload
-// configuration without rebuilding the Auth instance.
+//	api := auth.Mount(router, humaConfig)
+//
+// Sessions live in the sso_sessions table, which New creates. Expired rows are
+// removed by Cleanup, which the app runs for as long as it serves requests.
+// Options are read once, so a credential change needs a restart; the app's own
+// config hot reload keeps working for everything else.
 package gosso

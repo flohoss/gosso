@@ -1,6 +1,7 @@
 package gosso
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -8,21 +9,50 @@ import (
 	"time"
 )
 
-// MinSessionKeyLength is the shortest accepted signing key for HMACSessions.
-const MinSessionKeyLength = 32
+const (
+	// DefaultSessionTTL is the session lifetime used when Options.SessionTTL is not positive.
+	DefaultSessionTTL = 24 * time.Hour
 
-// Config holds the OpenID Connect settings shared by all apps using this package.
-type Config struct {
+	defaultCookieSuffix = "_session"
+	defaultStateSuffix  = "_oidc_state"
+)
+
+// Options holds the OpenID Connect settings and dependencies of a single app.
+type Options struct {
+	// Enabled switches the whole auth surface on. A disabled instance answers 404
+	// on the lifecycle routes and lets every request through.
+	Enabled bool
+
 	IssuerURL    string
 	ClientID     string
 	ClientSecret string
-	SessionKey   string
-	SessionTTL   time.Duration
+
+	// SessionTTL bounds a session; DefaultSessionTTL applies when it is not positive.
+	SessionTTL time.Duration
+
+	// CookieSecure marks the cookies as HTTPS-only.
 	CookieSecure bool
-	AppURL       string
-	Scopes       []string
+
+	// CookiePrefix prefixes the state cookie and derives the session cookie name.
+	// It defaults to the sanitized ClientID.
 	CookiePrefix string
-	Enabled      bool
+
+	// CookieName overrides the session cookie name. It defaults to CookiePrefix + "_session".
+	CookieName string
+
+	// AppURL is the externally reachable base URL. When empty the callback URL is
+	// derived from the request, which needs a proxy that forwards the scheme.
+	AppURL string
+
+	// LoginPath is where Middleware redirects unauthenticated requests. When empty
+	// they are answered with 401 instead, which suits JSON APIs.
+	LoginPath string
+
+	// Scopes defaults to ["openid"].
+	Scopes []string
+
+	// DB stores the sessions. It is created and cleaned up by this package.
+	DB *sql.DB
 }
 
 var (
@@ -30,68 +60,67 @@ var (
 	ErrInvalidIssuer = errors.New("sso configuration error: issuer_url must be a valid absolute URL without a trailing slash")
 	// ErrMissingOIDCFields is returned when a required credential is empty while SSO is enabled.
 	ErrMissingOIDCFields = errors.New("sso configuration error: issuer_url, client_id and client_secret are required when SSO is enabled")
+	// ErrMissingDatabase is returned when no database was supplied for the session store.
+	ErrMissingDatabase = errors.New("sso configuration error: a database is required to store sessions")
+	// ErrInvalidAppURL is returned when AppURL is set but not parsable.
+	ErrInvalidAppURL = errors.New("sso configuration error: app_url must be a valid URL")
 )
 
-// DefaultScopes returns the scopes requested when Config.Scopes is empty.
-func DefaultScopes() []string {
-	return []string{"openid"}
-}
-
-// Validate reports whether the config carries usable issuer credentials and, when set, a parsable AppURL.
-func (c Config) Validate() error {
-	if c.IssuerURL == "" || c.ClientID == "" || c.ClientSecret == "" {
+// Validate reports whether the options carry usable issuer credentials and a parsable AppURL.
+func (o Options) Validate() error {
+	if o.IssuerURL == "" || o.ClientID == "" || o.ClientSecret == "" {
 		return ErrMissingOIDCFields
 	}
 
-	parsed, err := url.Parse(c.IssuerURL)
+	parsed, err := url.Parse(o.IssuerURL)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidIssuer, err)
 	}
-	if parsed.Scheme == "" || parsed.Host == "" || strings.HasSuffix(c.IssuerURL, "/") {
+	if parsed.Scheme == "" || parsed.Host == "" || strings.HasSuffix(o.IssuerURL, "/") {
 		return ErrInvalidIssuer
 	}
 
-	if c.AppURL != "" {
-		if _, err := url.Parse(c.AppURL); err != nil {
-			return fmt.Errorf("sso configuration error: app_url must be a valid URL: %w", err)
-		}
-	}
-
-	if c.SessionKey != "" {
-		if err := ValidateSessionKey(c.SessionKey); err != nil {
-			return fmt.Errorf("sso configuration error: %w", err)
+	if o.AppURL != "" {
+		if _, err := url.Parse(o.AppURL); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidAppURL, err)
 		}
 	}
 
 	return nil
 }
 
-// EffectiveSessionTTL returns SessionTTL, falling back to DefaultSessionTTL when it is not positive.
-func (c Config) EffectiveSessionTTL() time.Duration {
-	if c.SessionTTL <= 0 {
-		return DefaultSessionTTL
+// LoginPageURL returns the login page with the error code as query when one is set.
+func LoginPageURL(code LoginError) string {
+	if code == "" {
+		return LoginPagePath
 	}
 
-	return c.SessionTTL
+	return LoginPagePath + "?" + LoginQueryParam + "=" + string(code)
 }
 
-// CookieOptions returns the shared cookie attributes for this config.
-func (c Config) CookieOptions() CookieOptions {
-	secure := c.CookieSecure
-
-	return CookieOptions{Secure: func() bool { return secure }}
-}
-
-// WithDefaults returns a copy with SessionTTL and Scopes filled in when they are empty.
-func (c Config) WithDefaults() Config {
-	filled := c
+func (o Options) withDefaults() Options {
+	filled := o
 
 	if filled.SessionTTL <= 0 {
 		filled.SessionTTL = DefaultSessionTTL
 	}
 	if len(filled.Scopes) == 0 {
-		filled.Scopes = DefaultScopes()
+		filled.Scopes = []string{"openid"}
+	}
+	if filled.CookiePrefix == "" {
+		filled.CookiePrefix = defaultCookiePrefix(filled.ClientID)
+	}
+	if filled.CookieName == "" {
+		filled.CookieName = filled.CookiePrefix + defaultCookieSuffix
 	}
 
 	return filled
+}
+
+func defaultCookiePrefix(clientID string) string {
+	return strings.ToLower(strings.ReplaceAll(clientID, "-", ""))
+}
+
+func (o Options) stateCookieName() string {
+	return o.CookiePrefix + defaultStateSuffix
 }

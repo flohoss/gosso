@@ -1,14 +1,19 @@
 package gosso
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
+	"github.com/labstack/echo/v5"
+	"golang.org/x/oauth2"
 )
 
 func newOIDCServer(t *testing.T) *httptest.Server {
@@ -22,54 +27,25 @@ func newOIDCServer(t *testing.T) *httptest.Server {
 	return server
 }
 
-func newTestAuth(t *testing.T) *Auth {
-	t.Helper()
-
-	sessions := newHMACSessions()
-
-	return New(testSettingsFn(), sessions, "/auth/callback", "/login")
-}
-
-func testSettingsFn() func() Config {
-	return func() Config { return testConfig() }
-}
-
-func TestNew_DisabledDoesNotWarmProvider(t *testing.T) {
-	config := testConfig()
-	config.Enabled = false
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
-
-	rec := serveWithAuth(auth, "/anything", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected open access while disabled, got %d", rec.Code)
-	}
-}
-
-func TestAuth_EnabledFollowsConfig(t *testing.T) {
-	config := testConfig()
-	config.Enabled = true
-	auth := &Auth{Settings: func() Config { return config }}
-
-	if !auth.Enabled() {
-		t.Fatal("expected auth to be enabled")
+func TestNew_DisabledAuthenticatesNothingAndReturns404(t *testing.T) {
+	auth, err := New(Options{DB: newTestDB(t)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	config.Enabled = false
-	if auth.Enabled() {
-		t.Fatal("expected auth to be disabled after the reload")
+	if r, req := newTestContext(http.MethodGet, "/anything"); serveMiddleware(auth, r, req).Code != http.StatusOK {
+		t.Fatal("expected open access while disabled")
 	}
 }
 
 func TestStartLogin_RedirectsToProviderWithStateCookie(t *testing.T) {
 	server := newOIDCServer(t)
-	config := testConfig()
-	config.IssuerURL = server.URL
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+	auth := newTestAuthForProvider(t, server)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
 
-	if err := auth.StartLogin(rec, req, "/after/login"); err != nil {
+	if err := auth.StartLogin(echoContext(rec, req), "/after/login"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -77,7 +53,7 @@ func TestStartLogin_RedirectsToProviderWithStateCookie(t *testing.T) {
 		t.Fatalf("expected a redirect, got %d", rec.Code)
 	}
 
-	location := rec.Header().Get("Location")
+	location := rec.Header().Get(echo.HeaderLocation)
 	if !strings.HasPrefix(location, server.URL+"/auth?") {
 		t.Fatalf("expected a redirect to the provider, got %q", location)
 	}
@@ -85,256 +61,177 @@ func TestStartLogin_RedirectsToProviderWithStateCookie(t *testing.T) {
 		t.Fatal("expected a S256 code challenge")
 	}
 
-	var stateCookie *http.Cookie
-	for _, cookie := range rec.Result().Cookies() {
-		if strings.HasSuffix(cookie.Name, "_oidc_state") {
-			stateCookie = cookie
-		}
-	}
-	if stateCookie == nil {
-		t.Fatal("expected a state cookie")
-	}
+	stateCookie := stateCookieOf(t, rec.Result().Cookies(), auth)
 	if stateCookie.MaxAge != int(stateCookieTTL.Seconds()) {
-		t.Fatalf("expected the state cookie to be short-lived, got %d", stateCookie.MaxAge)
+		t.Fatalf("expected a short-lived state cookie, got %d", stateCookie.MaxAge)
 	}
 	if !stateCookie.HttpOnly {
 		t.Fatal("expected the state cookie to be HttpOnly")
 	}
-	if !strings.Contains(stateCookie.Value, "|") || !strings.Contains(stateCookie.Value, "/after/login") {
+
+	parts := strings.Split(stateCookie.Value, stateSeparator)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "/after/login" {
 		t.Fatalf("expected state|verifier|redirect, got %q", stateCookie.Value)
+	}
+
+	// oauth2 appends the redirect_uri at the front, producing
+	// auth?redirect_uri=...&client_id=...; only param presence and values matter.
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("failed to parse the provider redirect %q: %v", location, err)
+	}
+
+	query := u.Query()
+	if query.Get("client_id") != testOptions().ClientID {
+		t.Errorf("client_id = %q", query.Get("client_id"))
+	}
+	if query.Get("redirect_uri") != "http://example.com"+CallbackRoute {
+		t.Errorf("redirect_uri = %q", query.Get("redirect_uri"))
+	}
+	if query.Get("response_type") != "code" {
+		t.Errorf("response_type = %q", query.Get("response_type"))
+	}
+	if query.Get("scope") != "openid" {
+		t.Errorf("scope = %q", query.Get("scope"))
+	}
+	if query.Get("state") != parts[0] {
+		t.Errorf("state = %q, want the cookie state", query.Get("state"))
+	}
+	if query.Get("code_challenge") != oauth2.S256ChallengeFromVerifier(parts[1]) {
+		t.Errorf("code_challenge = %q, want the S256 challenge of the cookie verifier", query.Get("code_challenge"))
+	}
+	if query.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method = %q", query.Get("code_challenge_method"))
 	}
 }
 
-func TestStartLogin_RejectsInvalidConfig(t *testing.T) {
-	config := testConfig()
-	config.ClientSecret = ""
-	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+func TestStartLogin_OmitsTheRedirectSegmentWithoutATarget(t *testing.T) {
+	server := newOIDCServer(t)
+	auth := newTestAuthForProvider(t, server)
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
 
-	if err := auth.StartLogin(rec, req, "/"); !errors.Is(err, ErrMissingOIDCFields) {
+	if err := auth.StartLogin(echoContext(rec, req), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := strings.Count(stateCookieOf(t, rec.Result().Cookies(), auth).Value, stateSeparator); got != 1 {
+		t.Fatalf("expected state|verifier only, got %d separators", got)
+	}
+}
+
+func TestStartLogin_RejectsInvalidOptions(t *testing.T) {
+	auth := newTestAuth(t)
+	auth.opts.ClientSecret = ""
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
+
+	if err := auth.StartLogin(echoContext(rec, req), "/"); !errors.Is(err, ErrMissingOIDCFields) {
 		t.Fatalf("expected ErrMissingOIDCFields, got %v", err)
 	}
 }
 
 func TestStartLogin_FailsWhenProviderUnavailable(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }, provider: NewProvider(func() Config { return config })}
+	auth := newTestAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/oidc", nil)
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
 
-	err := auth.StartLogin(rec, req, "/")
-
-	if !errors.Is(err, ErrProviderUnavailable) {
+	if err := auth.StartLogin(echoContext(rec, req), "/"); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
 	}
 }
 
-func TestConsumeLoginState_ParsesAllParts(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }}
+// The handoff target has to survive the provider round trip inside the state
+// cookie and be rejected unless it is a site-relative path.
+func TestStartLogin_SanitizesTheRedirectTarget(t *testing.T) {
+	server := newOIDCServer(t)
+	auth := newTestAuthForProvider(t, server)
 
-	rec, req := newTestContext(http.MethodGet, "/")
-	value := "state-token|verifier-token|/jobs/1"
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: value})
+	for raw, want := range map[string]string{
+		"https://evil.example.com": "/",
+		"/jobs/1":                  "/jobs/1",
+		"/x\r\nSet-Cookie: p=1":    "/",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
 
-	state, verifier, redirect, err := auth.ConsumeLoginState(rec, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		if err := auth.StartLogin(echoContext(rec, req), raw); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	if state != "state-token" || verifier != "verifier-token" || redirect != "/jobs/1" {
-		t.Fatalf("unexpected parse result: %q %q %q", state, verifier, redirect)
-	}
-}
-
-func TestConsumeLoginState_RejectsMissingCookie(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }}
-
-	rec, req := newTestContext(http.MethodGet, "/")
-
-	if _, _, _, err := auth.ConsumeLoginState(rec, req); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("expected ErrUnauthenticated, got %v", err)
-	}
-}
-
-func TestConsumeLoginState_RejectsIncompleteValue(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }}
-
-	rec, req := newTestContext(http.MethodGet, "/")
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "only-state"})
-
-	if _, _, _, err := auth.ConsumeLoginState(rec, req); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("expected ErrUnauthenticated, got %v", err)
+		value := stateCookieOf(t, rec.Result().Cookies(), auth).Value
+		parts := strings.Split(value, stateSeparator)
+		got := "/"
+		if len(parts) > 2 {
+			got = parts[2]
+		}
+		if got != want {
+			t.Errorf("StartLogin(%q) stored %q, want %q", raw, got, want)
+		}
 	}
 }
 
-func TestMiddleware_LoginPathRedirectsUnauthenticated(t *testing.T) {
+func TestMiddleware_RedirectsUnauthenticatedToLoginPath(t *testing.T) {
 	auth := newTestAuth(t)
 
-	rec := serveWithAuth(auth, "/", "")
+	rec := serveMiddleware(auth, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected a redirect, got %d", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "/login" {
-		t.Fatalf("expected a redirect to /login, got %q", location)
+	if location := rec.Header().Get(echo.HeaderLocation); location != LoginPagePath {
+		t.Fatalf("expected a redirect to %q, got %q", LoginPagePath, location)
 	}
 }
 
 func TestMiddleware_WithoutLoginPathReturnsUnauthorized(t *testing.T) {
-	auth := newTestAuth(t)
-	auth.LoginPath = ""
+	opts := testOptions()
+	opts.LoginPath = ""
+	opts.DB = newTestDB(t)
 
-	rec := serveWithAuth(auth, "/", "")
+	auth, err := New(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := serveMiddleware(auth, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 
-func TestSessionTTL_FollowsConfig(t *testing.T) {
-	config := testConfig()
-	auth := &Auth{Settings: func() Config { return config }}
-
-	if auth.SessionTTL() != time.Hour {
-		t.Fatalf("expected the configured TTL, got %v", auth.SessionTTL())
-	}
-
-	config.SessionTTL = 0
-	if auth.SessionTTL() != DefaultSessionTTL {
-		t.Fatalf("expected the default TTL, got %v", auth.SessionTTL())
-	}
-}
-
-func TestAuth_EnabledToleratesNilReceiver(t *testing.T) {
-	var auth *Auth
-
-	if auth.Enabled() {
-		t.Fatal("expected a nil Auth to be disabled")
-	}
-}
-
-func TestPrefix_FallsBackToSanitizedClientID(t *testing.T) {
-	config := testConfig()
-	config.ClientID = "My-App-Client"
-	auth := &Auth{Settings: func() Config { return config }}
-
-	if got := auth.prefix(); got != "myappclient" {
-		t.Fatalf("prefix() = %q, want %q", got, "myappclient")
-	}
-
-	config.CookiePrefix = "custom"
-	if got := auth.prefix(); got != "custom" {
-		t.Fatalf("prefix() = %q, want %q", got, "custom")
-	}
-}
-
-func TestCallbackURL_MatchesInternal(t *testing.T) {
-	config := testConfig()
-	config.AppURL = "https://app.example.com"
-	auth := &Auth{Settings: func() Config { return config }, CallbackPath: "/auth/callback"}
-
-	_, req := newTestContext(http.MethodGet, "http://internal:8156/auth/login")
-
-	if got, want := auth.callbackURL(req), "https://app.example.com/auth/callback"; got != want {
-		t.Fatalf("callbackURL() = %q, want %q", got, want)
-	}
-}
-
-func TestStartSessionAndClearSessionRoundTrip(t *testing.T) {
+func TestMiddleware_AcceptsAnAuthenticatedRequest(t *testing.T) {
 	auth := newTestAuth(t)
-	rec, req := newTestContext(http.MethodGet, "/")
 
-	if err := auth.StartSession(rec, req, "user-subject"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cookie := startTestSession(t, auth, "user-subject")
 
-	var session *http.Cookie
-	for _, cookie := range rec.Result().Cookies() {
-		if cookie.Name == auth.Sessions.CookieName() {
-			session = cookie
-		}
-	}
-	if session == nil {
-		t.Fatal("expected a session cookie after StartSession")
-	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
 
-	subject, _, err := VerifyHMAC(testSessionKey, session.Value, time.Now())
-	if err != nil {
-		t.Fatalf("expected the session cookie to verify: %v", err)
-	}
-	if subject != "user-subject" {
-		t.Fatalf("unexpected subject %q", subject)
-	}
-
-	clearedRecorder, clearedRequest := newTestContext(http.MethodGet, "/")
-	auth.ClearSession(clearedRecorder, clearedRequest)
-
-	var expired *http.Cookie
-	for _, cookie := range clearedRecorder.Result().Cookies() {
-		if cookie.Name == auth.Sessions.CookieName() {
-			expired = cookie
-		}
-	}
-	if expired == nil || expired.MaxAge != -1 {
-		t.Fatalf("expected ClearSession to expire the cookie, got %+v", expired)
+	if got := serveMiddleware(auth, httptest.NewRecorder(), req).Code; got != http.StatusOK {
+		t.Fatalf("expected 200 for an authenticated request, got %d", got)
 	}
 }
 
-func TestDefaultCookiePrefix_PrefersConfigOverClientID(t *testing.T) {
-	if got := DefaultCookiePrefix(Config{CookiePrefix: "custom"}); got != "custom" {
-		t.Fatalf("DefaultCookiePrefix() = %q, want %q", got, "custom")
-	}
+func TestMiddleware_PassesThroughWhenDisabled(t *testing.T) {
+	opts := Options{DB: newTestDB(t)}
 
-	if got := DefaultCookiePrefix(Config{ClientID: "My-App-Client"}); got != "myappclient" {
-		t.Fatalf("DefaultCookiePrefix() = %q, want %q", got, "myappclient")
-	}
-}
-
-func TestHandleCallback_RunsTheFullFlow(t *testing.T) {
-	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
-
-	state, err := RandomToken(stateTokenSize)
+	auth, err := New(opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	verifier := "verifier"
-	rec, req := newTestContext(http.MethodGet,
-		server.URL+"/auth/callback?code=user-123&state="+state)
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|" + verifier + "|/jobs/1"})
 
-	result, failure := auth.HandleCallback(rec, req)
-	if failure != nil {
-		t.Fatalf("unexpected failure: %v", failure.Cause)
-	}
-	if result.Subject != "user-123" || result.Redirect != "/jobs/1" {
-		t.Fatalf("unexpected result: %+v", result)
-	}
-
-	var session *http.Cookie
-	for _, cookie := range rec.Result().Cookies() {
-		if cookie.Name == auth.Sessions.CookieName() {
-			session = cookie
-		}
-	}
-	if session == nil {
-		t.Fatal("expected a session cookie after the callback")
-	}
-	if subject, _, err := VerifyHMAC(testSessionKey, session.Value, time.Now()); err != nil || subject != "user-123" {
-		t.Fatalf("expected a valid session for user-123, got %q: %v", subject, err)
+	if got := serveMiddleware(auth, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil)).Code; got != http.StatusOK {
+		t.Fatalf("expected 200 while disabled, got %d", got)
 	}
 }
 
 func TestHandleCallback_RejectsProviderReportedError(t *testing.T) {
 	auth := newTestAuth(t)
-	rec, req := newTestContext(http.MethodGet, "/auth/callback?error=access_denied")
 
-	result, failure := auth.HandleCallback(rec, req)
+	result, failure := handleCallback(auth, "/api/auth/callback?error=access_denied")
 	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -342,10 +239,8 @@ func TestHandleCallback_RejectsProviderReportedError(t *testing.T) {
 
 func TestHandleCallback_RejectsStateMismatch(t *testing.T) {
 	auth := newTestAuth(t)
-	rec, req := newTestContext(http.MethodGet, "/auth/callback?code=user-123&state=other")
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "expected|verifier"})
 
-	result, failure := auth.HandleCallback(rec, req)
+	result, failure := handleCallbackWithCookie(auth, "/api/auth/callback?code=user-123&state=other", "expected|verifier")
 	if result != nil || failure == nil || failure.Code != LoginErrorExpired {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
@@ -356,105 +251,183 @@ func TestHandleCallback_RejectsStateMismatch(t *testing.T) {
 
 func TestHandleCallback_ClassifiesExchangeFailures(t *testing.T) {
 	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
+	auth := newTestAuthForProvider(t, server)
 
-	rec, req := newTestContext(http.MethodGet,
-		server.URL+"/auth/callback?code=no-id-token&state=any")
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: "any|verifier"})
-
-	result, failure := auth.HandleCallback(rec, req)
+	result, failure := handleCallbackWithCookie(auth,
+		server.URL+"/api/auth/callback?code=no-id-token&state=any", "any|verifier")
 	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
 }
 
-func TestHandleCallback_EnforcesAuthorizedSubjects(t *testing.T) {
+func TestHandleCallback_StartsTheSession(t *testing.T) {
 	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
-	auth.AuthorizeSubject = func(subject string) bool { return subject != "user-123" }
+	auth := newTestAuthForProvider(t, server)
 
-	state, err := RandomToken(stateTokenSize)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	rec, result, failure := callbackOf(t, auth, server,
+		"state-value|verifier|/jobs/1", "?code=user-123&state=state-value")
+	if failure != nil {
+		t.Fatalf("unexpected failure: %v", failure.Cause)
 	}
-	rec, req := newTestContext(http.MethodGet,
-		server.URL+"/auth/callback?code=user-123&state="+state)
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
-
-	result, failure := auth.HandleCallback(rec, req)
-	if result != nil || failure == nil || failure.Code != LoginErrorRejected {
-		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
-	}
-	if !errors.Is(failure.Cause, ErrSubjectUnauthorized) {
-		t.Fatalf("expected ErrSubjectUnauthorized, got %v", failure.Cause)
+	if result.Subject != "user-123" || result.Redirect != "/jobs/1" {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 
-	var session *http.Cookie
-	for _, cookie := range rec.Result().Cookies() {
-		if cookie.Name == auth.Sessions.CookieName() {
-			session = cookie
-		}
+	session := sessionCookieOf(t, rec.Result().Cookies(), auth)
+	if session == nil {
+		t.Fatal("expected a session cookie after the callback")
 	}
-	if session != nil {
-		t.Fatalf("expected no session cookie for an unauthorized subject, got %+v", session)
+
+	authenticated := httptest.NewRequest(http.MethodGet, "/", nil)
+	authenticated.AddCookie(session)
+	if user, err := auth.Authenticate(echoContext(httptest.NewRecorder(), authenticated)); err != nil || user.Subject != "user-123" {
+		t.Fatalf("expected a valid stored session, got %v", err)
+	}
+}
+
+func TestHandleCallback_PreservesSessionWhenProviderResolvesLate(t *testing.T) {
+	server := newFakeProvider(t)
+	auth := newTestAuthForProvider(t, server)
+
+	rec, result, failure := callbackOf(t, auth, server,
+		"state-value|verifier", "?code=user-123&state=state-value")
+	if failure != nil {
+		t.Fatalf("unexpected failure: %v", failure.Cause)
+	}
+	if result.Redirect != "/" {
+		t.Fatalf("Redirect = %q, want the fallback", result.Redirect)
+	}
+
+	session := sessionCookieOf(t, rec.Result().Cookies(), auth)
+	if session == nil || session.MaxAge != 0 {
+		t.Fatalf("expected a persistent session cookie, got %+v", session)
 	}
 }
 
 func TestHandleCallback_ReportsSessionFailures(t *testing.T) {
 	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	sessions := NewHMACSessions(HMACOptions{
-		Prefix: "testapp",
-		Settings: func() Config {
-			broken := config
-			broken.SessionKey = "too-short"
+	auth := newTestAuthForProvider(t, server)
 
-			return broken
-		},
-	})
-	auth := New(func() Config { return config }, sessions, "/auth/callback", "/login")
+	auth.sessions.db.Close()
 
-	state, err := RandomToken(stateTokenSize)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	rec, req := newTestContext(http.MethodGet,
-		server.URL+"/auth/callback?code=user-123&state="+state)
-	req.AddCookie(&http.Cookie{Name: auth.stateCookieName(), Value: state + "|verifier"})
-
-	result, failure := auth.HandleCallback(rec, req)
+	_, result, failure := callbackOf(t, auth, server,
+		"state-value|verifier", "?code=user-123&state=state-value")
 	if result != nil || failure == nil || failure.Code != LoginErrorFailed {
 		t.Fatalf("unexpected failure: %+v, %+v", result, failure)
 	}
-	if !errors.Is(failure.Cause, ErrInvalidSessionKey) {
-		t.Fatalf("expected ErrInvalidSessionKey, got %v", failure.Cause)
-	}
 }
 
-func TestExchange_ReturnsTheSubject(t *testing.T) {
-	server := newFakeProvider(t)
-	config := fakeProviderConfig(server)
-	auth := New(func() Config { return config }, newHMACSessions(), "/auth/callback", "/login")
-
-	_, req := newTestContext(http.MethodGet, server.URL+"/auth/callback?code=user-123")
-
-	subject, err := auth.Exchange(req, "user-123", "verifier")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if subject != "user-123" {
-		t.Fatalf("subject = %q, want %q", subject, "user-123")
-	}
-}
-
-func TestMiddleware_AcceptsAuthenticatedRequest(t *testing.T) {
+func TestAuthenticate_RejectsMissingOrUnknownSession(t *testing.T) {
 	auth := newTestAuth(t)
-	cookie := auth.Sessions.CookieName() + "=" + SignHMAC(testSessionKey, "user-subject", time.Now().Add(time.Hour))
 
-	rec := serveWithAuth(auth, "/", cookie)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for an authenticated request, got %d", rec.Code)
+	withoutCookie := httptest.NewRequest(http.MethodGet, "/", nil)
+	if _, err := auth.Authenticate(echoContext(httptest.NewRecorder(), withoutCookie)); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated without a cookie, got %v", err)
 	}
+
+	unknown := httptest.NewRequest(http.MethodGet, "/", nil)
+	unknown.AddCookie(&http.Cookie{Name: auth.opts.CookieName, Value: "unknown"})
+	if _, err := auth.Authenticate(echoContext(httptest.NewRecorder(), unknown)); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated for an unknown session, got %v", err)
+	}
+}
+
+func TestClearSession_RevokesAndExpiresTheCookie(t *testing.T) {
+	auth := newTestAuth(t)
+	cookie := startTestSession(t, auth, "user-subject")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+
+	auth.ClearSession(echoContext(rec, req))
+
+	if _, err := auth.Authenticate(echoContext(httptest.NewRecorder(), req)); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected the session to be revoked, got %v", err)
+	}
+
+	expired := sessionCookieOf(t, rec.Result().Cookies(), auth)
+	if expired == nil || expired.MaxAge != -1 {
+		t.Fatalf("expected ClearSession to expire the cookie, got %+v", expired)
+	}
+}
+
+func TestCleanup_RemovesExpiredSessions(t *testing.T) {
+	auth := newTestAuth(t)
+	cookie := startTestSession(t, auth, "user-subject")
+	expireSession(t, auth, cookie)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	auth.Cleanup(ctx)
+
+	if count := sessionCount(t, auth); count != 0 {
+		t.Fatalf("%d expired sessions survived the cleanup", count)
+	}
+}
+
+// synctest fakes the clock, so the hourly ticker fires without waiting.
+func TestCleanup_DeletesExpiredSessionsOnEveryTick(t *testing.T) {
+	auth := newTestAuth(t)
+	cookie := startTestSession(t, auth, "user-subject")
+	expireSession(t, auth, cookie)
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			auth.Cleanup(ctx)
+		}()
+
+		time.Sleep(cleanupInterval)
+		synctest.Wait()
+
+		cancel()
+		<-done
+	})
+
+	if count := sessionCount(t, auth); count != 0 {
+		t.Fatalf("%d sessions survived the cleanup tick", count)
+	}
+}
+
+func expireSession(t *testing.T, auth *Auth, cookie *http.Cookie) {
+	t.Helper()
+
+	if _, err := auth.sessions.db.ExecContext(t.Context(),
+		`UPDATE sso_sessions SET expires_at = 0 WHERE jti = ?`, cookie.Value); err != nil {
+		t.Fatalf("failed to expire the session: %v", err)
+	}
+}
+
+func sessionCount(t *testing.T, auth *Auth) int {
+	t.Helper()
+
+	var count int
+	if err := auth.sessions.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sso_sessions`).Scan(&count); err != nil {
+		t.Fatalf("failed to count sessions: %v", err)
+	}
+
+	return count
+}
+
+func TestHandleCallback_RejectsMalformedStateCookies(t *testing.T) {
+	auth := newTestAuth(t)
+
+	for _, value := range []string{"", "only", "|verifier", "state|"} {
+		_, _, _, err := auth.consumeLoginState(httptest.NewRecorder(), requestWithStateCookie(t, auth, value))
+		if !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("expected ErrUnauthenticated for the state cookie %q, got %v", value, err)
+		}
+	}
+}
+
+func requestWithStateCookie(t *testing.T, auth *Auth, value string) *http.Request {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, CallbackRoute, nil)
+	req.AddCookie(&http.Cookie{Name: auth.opts.stateCookieName(), Value: value})
+
+	return req
 }

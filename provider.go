@@ -3,7 +3,6 @@ package gosso
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -16,30 +15,40 @@ import (
 // DiscoveryTimeout bounds a single OIDC discovery attempt.
 const DiscoveryTimeout = 10 * time.Second
 
-const stateTokenSize = 24
+// Provider caches OIDC discovery for the configured issuer and client ID.
+type Provider struct {
+	mu        sync.Mutex
+	state     *providerState
+	issuerURL string
+	clientID  string
+	secret    string
+	scopes    []string
+}
 
 type providerState struct {
-	key      string
 	verifier *oidc.IDTokenVerifier
-	Config   oauth2.Config
+	config   oauth2.Config
 }
 
-// Provider caches OIDC discovery for the current issuer and client ID.
-type Provider struct {
-	mu       sync.Mutex
-	current  *providerState
-	settings func() Config
+// RandomToken returns a cryptographically random text token; state tokens for
+// OAuth2 redirects and session identifiers use it.
+func RandomToken() string {
+	return rand.Text()
 }
 
-// NewProvider returns a Provider reading its settings through the supplied function.
-func NewProvider(settings func() Config) *Provider {
-	return &Provider{settings: settings}
+func newProvider(opts Options) *Provider {
+	return &Provider{
+		issuerURL: opts.IssuerURL,
+		clientID:  opts.ClientID,
+		secret:    opts.ClientSecret,
+		scopes:    opts.Scopes,
+	}
 }
 
 // Warm starts discovery in the background so the first login request does not pay for it.
 func (p *Provider) Warm() {
 	go func() {
-		_, _ = p.resolve()
+		_, _ = p.Resolve()
 	}()
 }
 
@@ -48,7 +57,7 @@ func (p *Provider) Resolved() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return p.current != nil
+	return p.state != nil
 }
 
 // Resolve resolves the provider now and reports whether discovery succeeded.
@@ -58,87 +67,73 @@ func (p *Provider) Resolve() (bool, error) {
 	return err == nil, err
 }
 
-// resolve returns the cached provider state, rediscovering when the issuer or client ID changed.
+// resolve returns the cached provider state, rediscovering only after a reset.
 // Discovery failures are not cached and are retried on the next call.
 func (p *Provider) resolve() (*providerState, error) {
-	current := p.settings()
-	key := providerKey(current)
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.current != nil && p.current.key == key {
-		return p.current, nil
+	if p.state != nil {
+		return p.state, nil
 	}
 
-	provider, err := discoverProvider(current)
+	state, err := p.discover()
 	if err != nil {
 		return nil, err
 	}
+	p.state = state
 
-	p.current = provider
-
-	return provider, nil
+	return state, nil
 }
 
-func providerKey(settings Config) string {
-	return settings.IssuerURL + "|" + settings.ClientID
-}
-
-func discoverProvider(settings Config) (*providerState, error) {
+func (p *Provider) discover() (*providerState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DiscoveryTimeout)
 	defer cancel()
 
-	provider, err := oidc.NewProvider(ctx, settings.IssuerURL)
+	provider, err := oidc.NewProvider(ctx, p.issuerURL)
 	if err != nil {
-		logger.Load().Warn("OIDC discovery failed, will retry on the next request", "issuer", settings.IssuerURL, "error", err)
-		return nil, fmt.Errorf("%w: discovery for %q failed: %w", ErrProviderUnavailable, settings.IssuerURL, err)
+		logger.Load().Warn("OIDC discovery failed, will retry on the next request", "issuer", p.issuerURL, "error", err)
+
+		return nil, fmt.Errorf("%w: discovery for %q failed: %w", ErrProviderUnavailable, p.issuerURL, err)
 	}
 
-	scopes := settings.Scopes
-	if len(scopes) == 0 {
-		scopes = DefaultScopes()
-	}
+	scopes := p.scopes
 
-	logger.Load().Info("SSO provider discovered", "issuer", settings.IssuerURL)
+	logger.Load().Info("SSO provider discovered", "issuer", p.issuerURL)
 
 	return &providerState{
-		key: providerKey(settings),
 		verifier: provider.Verifier(&oidc.Config{
-			ClientID: settings.ClientID,
+			ClientID: p.clientID,
 		}),
-		Config: oauth2.Config{
-			ClientID: settings.ClientID,
+		config: oauth2.Config{
+			ClientID: p.clientID,
 			Endpoint: provider.Endpoint(),
 			Scopes:   scopes,
 		},
 	}, nil
 }
 
-// Login returns the oauth2.Config used to build the authorization redirect.
-func (p *Provider) Login(settings Config, redirectURL string) (oauth2.Config, error) {
+// oauthConfig returns the cached discovery config with the secret and the
+// redirect URI filled in, plus the verifier matching the discovery key set.
+func (p *Provider) oauthConfig(redirectURL string) (oauth2.Config, *oidc.IDTokenVerifier, error) {
 	state, err := p.resolve()
 	if err != nil {
-		return oauth2.Config{}, err
+		return oauth2.Config{}, nil, err
 	}
 
-	login := state.Config
-	login.ClientSecret = settings.ClientSecret
+	login := state.config
+	login.ClientSecret = p.secret
 	login.RedirectURL = redirectURL
 
-	return login, nil
+	return login, state.verifier, nil
 }
 
-// Exchange redeems the code with PKCE, verifies the id_token and returns its subject.
-func (p *Provider) Exchange(ctx context.Context, settings Config, code, verifier, redirectURL string) (string, error) {
-	state, err := p.resolve()
+// exchange redeems the code with PKCE, verifies the id_token and returns its subject.
+func (p *Provider) exchange(ctx context.Context, code, verifier, redirectURL string) (string, error) {
+	login, idTokenVerifier, err := p.oauthConfig(redirectURL)
 	if err != nil {
 		return "", err
 	}
-
-	login := state.Config
-	login.ClientSecret = settings.ClientSecret
-	login.RedirectURL = redirectURL
 
 	token, err := login.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
@@ -150,7 +145,7 @@ func (p *Provider) Exchange(ctx context.Context, settings Config, code, verifier
 		return "", errors.New("OIDC provider did not return an id_token")
 	}
 
-	idToken, err := state.verifier.Verify(ctx, rawIDToken)
+	idToken, err := idTokenVerifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		return "", fmt.Errorf("failed to verify id_token: %w", err)
 	}
@@ -160,14 +155,4 @@ func (p *Provider) Exchange(ctx context.Context, settings Config, code, verifier
 	}
 
 	return idToken.Subject, nil
-}
-
-// RandomToken returns size cryptographically random bytes as a hex string.
-func RandomToken(size int) (string, error) {
-	buffer := make([]byte, size)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", fmt.Errorf("failed to read random bytes: %w", err)
-	}
-
-	return hex.EncodeToString(buffer), nil
 }
