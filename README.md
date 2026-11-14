@@ -11,7 +11,7 @@ The package is Echo- and Huma-native: `Auth.Mount` registers the lifecycle route
 go get github.com/flohoss/gosso/v3
 ```
 
-Requires Go 1.27.3 or newer.
+Requires Go 1.27.4 or newer.
 
 ## What it provides
 
